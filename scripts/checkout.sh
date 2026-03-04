@@ -46,3 +46,5 @@ mkdir -p src
 # simulator
 clone_or_pull jazzy git@github.com:AustinVillaatHome/mujoco_cobot.git src/mujoco_cobot
 clone_or_pull main https://github.com/ros-controls/mujoco_ros2_control.git src/mujoco_ros2_control
+clone_or_pull main https://github.com/google-deepmind/mujoco_menagerie.git src/mujoco_menagerie
+clone_or_pull master https://github.com/pal-robotics/mujoco_vendor.git src/mujoco_vendor
