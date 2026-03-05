@@ -5,22 +5,10 @@ all: build
 clean:
 	rm -rf build install log
 
-sim:
-	@if ! command -v colcon >/dev/null 2>&1; then \
-		echo "Error: A ROS2 installation including the 'colcon' build tool is required"; \
-		echo "Please install ROS2 and the colcon build tool before proceeding"; \
-		exit 1; \
-	fi
-	colcon build || exit 1
-
 build:
 	@if ! command -v colcon >/dev/null 2>&1; then \
 		echo "Error: A ROS2 installation including the 'colcon' build tool is required"; \
 		echo "Please install ROS2 and the colcon build tool before proceeding"; \
 		exit 1; \
-	fi; \
-	if [ -n "$$JETSON_MODEL" ]; then \
-		colcon build --cmake-args -DCMAKE_BUILD_MODE="Hardware" || exit 1; \
-	else \
-		colcon build || exit 1; \
 	fi
+	colcon build --symlink-install || exit 1
