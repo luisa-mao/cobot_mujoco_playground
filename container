@@ -342,11 +342,11 @@ dockerstop() {
   fi
 }
 dockershell() {
-  docker exec -it $RUNNING_CONTAINER $EXEC
+  docker exec -it -e DISPLAY="$_DISPLAY" $RUNNING_CONTAINER $EXEC
 }
 dockercmd() {
   RUNNING_CONTAINER=$(docker container ls -q --filter name=$CONTAINER_NAME)
-  docker exec -it $RUNNING_CONTAINER /bin/bash -l -c "$@"
+  docker exec -it -e DISPLAY="$_DISPLAY" $RUNNING_CONTAINER /bin/bash -l -c "$@"
 }
 
 case $DOCKER_COMMAND in
