@@ -224,7 +224,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 # Clone and install MuJoCo Playground
 RUN --mount=type=cache,target=/root/.cache/pip \
-    git clone https://github.com/google-deepmind/mujoco_playground.git /opt/mujoco_playground && \
+    git clone -b v0.1.0 https://github.com/google-deepmind/mujoco_playground.git /opt/mujoco_playground && \
     cd /opt/mujoco_playground && \
     pip3 install --break-system-packages --ignore-installed scipy numpy -e .
 
@@ -310,9 +310,9 @@ RUN echo "set -g mouse on" >> /home/${USERNAME}/.tmux.conf && \
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip3 install --break-system-packages setuptools==69.5.1
 
+# Fix cache permissions if ros cache exists
+RUN mkdir -p /home/${USERNAME}/.cache && chmod -R 777 /home/${USERNAME}/.cache
+
 USER $username
 ENV HOME=/home/$username
 WORKDIR /home/$username
-
-# Fix cache permissions if ros cache exists
-RUN mkdir -p /home/${USERNAME}/.cache && sudo chmod -R 777 /home/${USERNAME}/.cache
