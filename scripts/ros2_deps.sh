@@ -55,6 +55,7 @@ apt-get install -y \
   ros-$ROS_DISTRO-moveit-msgs \
   ros-$ROS_DISTRO-moveit-resources \
   ros-$ROS_DISTRO-moveit \
+  ros-$ROS_DISTRO-moveit-servo \
   ros-$ROS_DISTRO-ros2-control \
   ros-$ROS_DISTRO-ros2-control-cmake \
   ros-$ROS_DISTRO-robotiq-description \

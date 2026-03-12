@@ -275,7 +275,8 @@ RUN set -e && \
     echo "${USERNAME} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/${USERNAME} && \
     chmod 0440 /etc/sudoers.d/${USERNAME} && \
     visudo -c && \
-    usermod -aG video ${USERNAME}
+    usermod -aG video ${USERNAME} && \
+    usermod -aG input ${USERNAME}
 
 # Create groups matching the host's group IDs (i2c, dialout, input) for Jetson
 RUN set -e && \
