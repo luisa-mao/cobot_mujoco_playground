@@ -1,0 +1,11 @@
+<mujocoinclude>
+  <body name="table" pos="0.8 0 0">
+    <geom name="table_top" type="box" size="0.4 0.6 0.02" pos="0 0 0.7" 
+          material="gym_floor_mat" class="environment" 
+          friction="1.5 0.01 0.0001" condim="4"
+          solimp="0.9 0.95 0.001" solref="0.02 1.0"/> <geom name="table_leg_0" type="box" size="0.02 0.02 0.35" pos="0.35 0.55 0.35" rgba="0.2 0.2 0.2 1" class="environment"/>
+    <geom name="table_leg_1" type="box" size="0.02 0.02 0.35" pos="-0.35 0.55 0.35" rgba="0.2 0.2 0.2 1" class="environment"/>
+    <geom name="table_leg_2" type="box" size="0.02 0.02 0.35" pos="0.35 -0.55 0.35" rgba="0.2 0.2 0.2 1" class="environment"/>
+    <geom name="table_leg_3" type="box" size="0.02 0.02 0.35" pos="-0.35 -0.55 0.35" rgba="0.2 0.2 0.2 1" class="environment"/>
+  </body>
+</mujocoinclude>

@@ -166,7 +166,8 @@
                         </body>
                         <body name="left_driver" pos="0 -0.0306011 0.054904" quat="0 0 0 1">
                           <inertial mass="0.00899563" pos="0 0.0177547 0.00107314" quat="0.681301 0.732003 0 0" diaginertia="1.72352e-06 1.60906e-06 3.22006e-07" />
-                          <joint name="left_driver_joint" class="driver" />
+                          <!-- <joint name="left_driver_joint" class="driver" /> -->
+                          <joint name="left_driver_joint" class="driver" mimic="right_driver_joint" />
                           <geom class="2f85_visual" mesh="driver" material="gray" />
                           <geom class="2f85_collision" type="capsule" fromto="0 0 0 0 0.03 0" size="0.01" />
                           <body name="left_coupler" pos="0 0.0315 -0.0041">
@@ -219,7 +220,7 @@
   <equality>
     <connect anchor="0 0 0" body1="right_follower" body2="right_coupler" solimp="0.95 0.99 0.001" solref="0.005 1" />
     <connect anchor="0 0 0" body1="left_follower" body2="left_coupler" solimp="0.95 0.99 0.001" solref="0.005 1" />
-    <joint joint1="right_driver_joint" joint2="left_driver_joint" polycoef="0 1 0 0 0" solimp="0.95 0.99 0.001" solref="0.005 1" />
+    <!-- <joint joint1="right_driver_joint" joint2="left_driver_joint" polycoef="0 1 0 0 0" solimp="0.95 0.99 0.001" solref="0.005 1" /> -->
   </equality>
 
   <tendon>
