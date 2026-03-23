@@ -58,6 +58,11 @@ import matplotlib.pyplot as plt
 from ml_collections import config_dict
 from flax import struct
 
+import xml.etree.ElementTree as ET
+import wandb
+import numpy as np
+
+
 # Standardize numpy printing
 np.set_printoptions(precision=3, suppress=True, linewidth=100)
 
@@ -69,7 +74,6 @@ except Exception as e:
     print(f'Initialization failed: {e}')
 
 
-import xml.etree.ElementTree as ET
 def prepare_cobot_model(robot_xml_path, table_xml_path, assets_dir, num_blocks=3):
     tree = ET.parse(robot_xml_path)
     root = tree.getroot()
@@ -129,34 +133,6 @@ def prepare_cobot_model(robot_xml_path, table_xml_path, assets_dir, num_blocks=3
 
     return ET.tostring(root, encoding='unicode')
 
-# --- COMPILE ---
-ASSETS_DIR = "/home/luisamao/villa_spaces/sim_ws/src/mujoco_cobot/assets"
-ROBOT_XML = "/home/luisamao/villa_spaces/sim_ws/robot_simple_collision.xml"
-TABLE_XML = "/home/luisamao/villa_spaces/sim_ws/table.xml"
-xml_string = prepare_cobot_model(ROBOT_XML, TABLE_XML, ASSETS_DIR)
-mj_model = mujoco.MjModel.from_xml_string(xml_string)
-mj_data = mujoco.MjData(mj_model)
-
-print(f"Success! Model compiled with {mj_model.ngeom} geometries.")
-# renderer = mujoco.Renderer(mj_model)
-
-print(f"\nModel loaded successfully!")
-print(f"  - DOFs: {mj_model.nv}")
-print(f"  - Bodies: {mj_model.nbody}")
-print(f"  - Joints: {mj_model.njnt}")
-print(f"  - Actuators: {mj_model.nu}")
-
-# Environment configuration
-TIMESTEP = 0.002  # 2ms per step
-BATCH_SIZE = 4 # 256  # Large batch size for parallel simulations
-EPISODE_LENGTH = 20 # 200  # Steps per episode
-NUM_EPISODES = 10 # 100  # Total training episodes
-LEARNING_RATE = 1e-3
-
-print(f"\nEnvironment Configuration:")
-print(f"  - Batch Size: {BATCH_SIZE}")
-print(f"  - Episode Length: {EPISODE_LENGTH}")
-print(f"  - Total Training Episodes: {NUM_EPISODES}")
 
 import functools
 import warnings
@@ -172,18 +148,16 @@ from brax.io import mjcf
 
 class CobotEnv(PipelineEnv):
     def __init__(self, target_pos=None, **kwargs):
-        mj_model.opt.solver = mujoco.mjtSolver.mjSOL_CG
+        mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
         mj_model.opt.iterations = 30     # Increase from 6
         mj_model.opt.ls_iterations = 10  # Important for stability
         mj_model.opt.timestep = 0.002
-
 
         sys = mjcf.load_model(mj_model)
 
         n_frames = 10
         table_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_GEOM, 'table_top')
-        print(f"Table geom index: {table_id}, Z position: {mj_model.geom_pos[table_id, 2]:.3f}")
-        self._table_z = mj_model.geom_pos[table_id, 2]
+        # jax.debug.print(f"Table geom index: {table_id}, Z position: {mj_model.geom_pos[table_id, 2]:.3f}")
         self._table_id = table_id
         super().__init__(sys, n_frames=n_frames, backend='mjx', **kwargs)
 
@@ -198,7 +172,6 @@ class CobotEnv(PipelineEnv):
     @property
     def action_size(self):
         return 7
-        # return 11 # 4 (sin/cos pairs) + 3 (limited joints) = 11
 
     def reset(self, rng: jp.ndarray) -> State:
         # 1. Initialize full arrays
@@ -206,14 +179,26 @@ class CobotEnv(PipelineEnv):
         qvel = jp.zeros(self.sys.nv) 
         
         # 2. Set Robot Home (Indices 0-6)
-        robot_home = jp.array([0.1, 1.019, 0.144, .7, -0.221, 0.6, -0.886])
+        robot_home = jp.array([0.2, 1.019, 0.144, .6, -0.221, 0.5, -0.886])
         qpos = qpos.at[:7].set(robot_home)
         
         # 3. Set Block Stack (Indices 7 to 7 + 7*N)
-        table_surface_z = 0.72
+        table_surface_z = self.sys.geom_pos[self._table_id, 2] + 0.02
         block_half_height = 0.03
         num_blocks = (self.sys.nq - 7) // 7  # Calculate N based on qpos size
-        
+
+        rng, pos_key = jax.random.split(rng)
+    
+        block_base_x, block_base_y = 0.8, 0.0
+        jitter = 0.1
+        xy_offset = jax.random.uniform(
+            pos_key, (2,), minval=-jitter, maxval=jitter
+        )
+        block_curr_x = block_base_x + xy_offset[0]
+        block_curr_y = block_base_y + xy_offset[1]
+        # print the table height from the sys model
+        # jax.debug.print("Reset: Table Z from sys model shape: {s}", s=self.sys.geom_pos.shape)
+        # jax.debug.print("Reset: Table Z from sys model: {z}", z=self.sys.geom_pos[self._table_id, 2])        
         # We loop to create a stack in qpos
         for i in range(num_blocks):
             # Calculate start index for this specific block
@@ -223,11 +208,22 @@ class CobotEnv(PipelineEnv):
             # We add a small 0.01 gap from table and 0.001 between blocks for stability
             z_pos = table_surface_z + (block_half_height * 2 * i) + block_half_height + 0.01 + (i * 0.001)
             
-            block_state = jp.array([0.8, 0.0, z_pos, 1.0, 0.0, 0.0, 0.0])
+            block_state = jp.array([block_curr_x, block_curr_y, z_pos, 1.0, 0.0, 0.0, 0.0])
             qpos = qpos.at[start_idx : start_idx + 7].set(block_state)
-        
         # Initialize the physics pipeline
         data = self.pipeline_init(qpos, qvel)
+
+        # 3. SETTLE THE BLOCKS: Step physics 50 times (~0.5 - 1.0s) with NO movement
+        # We use a zero action (no torque/velocity change)
+        settle_steps = 500
+        
+        def settle_fn(i, val):
+            # Step physics with the current robot position as the constant target
+            return self.pipeline_step(val, qpos[:7])
+            
+        # This runs entirely on the GPU during the reset call
+        data = jax.lax.fori_loop(0, settle_steps, settle_fn, data)
+        
         
         # --- Target and Metrics Logic ---
         rng, target_key = jax.random.split(rng)
@@ -255,69 +251,16 @@ class CobotEnv(PipelineEnv):
             'prev_ctrl': jp.zeros(7),
             'prev_action': jp.zeros(7),
             'target_pos': target_pos,
+            'block1_init_pos': data.qpos[7:10],  # Position of the first block in the stack
+            'block2_init_pos': data.qpos[14:17],  # Position of the second block in the stack
+            'block3_init_pos': data.qpos[21:24],  # Position of the third block in the stack
         }
         obs = self._get_obs(data, info)
                 
-        return State(data, obs, reward, done, metrics, info)
-    
-    # let ctrl be the 7-dim vector input in sim. let action be 11 dim output from policy
-    def ctrl_to_action(self, ctrl_7: jp.ndarray, scale_to_limits: bool = False) -> jp.ndarray:
-        # Physical limits for the bounded joints (indices 1, 3, 5)
-        # if network predicts delta actions, don't scale to limits since the deltas are in [-1, 1] already
+        state = State(data, obs, reward, done, metrics, info)
 
-        low_lim = jp.array([-2.24, -2.57, -2.09])
-        high_lim = jp.array([2.24, 2.57, 2.09])
-        
-        # 1. Infinite Joints: Map [-1, 1] to [-pi, pi] then to sin/cos
-        # Indices 0, 2, 4, 6
-        inf_angles = ctrl_7[jp.array([0, 2, 4, 6])]
-        sins = jp.sin(inf_angles)
-        coss = jp.cos(inf_angles)
-        
-        # 2. Limited Joints: Scale [-1, 1] to [low, high] radians
-        # Indices 1, 3, 5
-        lim_actions = ctrl_7[jp.array([1, 3, 5])]
-        if scale_to_limits:
-            lim_actions = 2.0 * (lim_actions - low_lim) / (high_lim - low_lim) - 1.0
-        
-        # 3. Assemble 11-dim Control Vector
-        ctrl_11 = jp.array([
-            sins[0], coss[0], # J0 (Inf)
-            lim_actions[0],    # J1 (Lim)
-            sins[1], coss[1], # J2 (Inf)
-            lim_actions[1],    # J3 (Lim)
-            sins[2], coss[2], # J4 (Inf)
-            lim_actions[2],    # J5 (Lim)
-            sins[3], coss[3]  # J6 (Inf)
-        ])
-        return ctrl_11 
-
-    def action_to_ctrl(self, action_11: jp.ndarray, scale_to_limits: bool = False) -> jp.ndarray:
-        """Converts 11-dim (sin/cos/lim) back to 7-dim radians."""
-        # if network predicts delta actions, don't scale to limits since the deltas are in [-1, 1] already
-
-        # 1. Convert sin/cos pairs back to radians using atan2
-        # atan2(sin, cos) returns the angle in [-pi, pi]
-        rad_0 = jp.atan2(action_11[0], action_11[1])
-        rad_2 = jp.atan2(action_11[3], action_11[4])
-        rad_4 = jp.atan2(action_11[6], action_11[7])
-        rad_6 = jp.atan2(action_11[9], action_11[10])
-        
-        # 2. Limited joints are already in radians (from the action_to_ctrl scaling)
-        rad_1 = action_11[2]
-        rad_3 = action_11[5]
-        rad_5 = action_11[8]
-
-        if scale_to_limits:
-            # scale from [-1, 1] to limits
-            low_lim = jp.array([-2.24, -2.57, -2.09])
-            high_lim = jp.array([2.24, 2.57, 2.09])
-            rad_1 = low_lim[0] + (high_lim[0] - low_lim[0]) * (rad_1 + 1) / 2
-            rad_3 = low_lim[1] + (high_lim[1] - low_lim[1]) * (rad_3 + 1) / 2
-            rad_5 = low_lim[2] + (high_lim[2] - low_lim[2]) * (rad_5 + 1) / 2
-
-        return jp.array([rad_0, rad_1, rad_2, rad_3, rad_4, rad_5, rad_6])
-        
+        return state
+            
     # todo: the init poses should be randomized
     def step(self, state: State, action: jp.ndarray) -> State:
         ctrl_delta = action * 0.1
@@ -338,12 +281,8 @@ class CobotEnv(PipelineEnv):
         )
         
         # 1. Initial Height Constants
-        table_z = self._table_z
+        table_z = self.sys.geom_pos[self._table_id, 2]
         block_height = 0.06 # 0.03 half-height * 2
-        
-        # The top block (Block 2) starts at roughly:
-        # table_z + (block_height * 2) + block_half_height + offset
-        init_z_2 = table_z + (block_height / 2 * 5) + 0.01 + 0.002 
         
         # 2. Step the physics
         data = self.pipeline_step(state.pipeline_state, final_ctrl)
@@ -354,16 +293,20 @@ class CobotEnv(PipelineEnv):
         pos_2 = data.qpos[21:24]
         hand_pos = data.site_xpos[self._ee_site_idx]
 
+        pos_0_init = state.info['block1_init_pos']
+        pos_1_init = state.info['block2_init_pos']
+        pos_2_init = state.info['block3_init_pos']
+
         
         # 4. Movement/Fall calculations
         # Stability check: Did the base blocks move?
-        move_0 = jp.linalg.norm(pos_0[:2] - jp.array([0.8, 0.0]))
-        move_1 = jp.linalg.norm(pos_1[:2] - jp.array([0.8, 0.0]))
+        move_0 = jp.linalg.norm(pos_0[:2] - pos_0_init[:2])
+        move_1 = jp.linalg.norm(pos_1[:2] - pos_1_init[:2])
         is_failure = (move_0 > 0.03) | (move_1 > 0.03)
 
         # If Z displacement is negative and larger than half the block height, it fell
-        z_dropped = init_z_2 - pos_2[2]
-        is_success = z_dropped > 0.04 # Fell at least 4cm down
+        z_dropped = pos_2_init[2] - pos_2[2]
+        is_success = z_dropped > 0.04 # Fell at least 8cm down
         # is_success = is_success & ~is_failure  # Success only if it fell and the bottom blocks are stable
 
         # table penetration check
@@ -382,8 +325,6 @@ class CobotEnv(PipelineEnv):
         top_reward_knockdown = jp.where(is_success, 80.0, 0.0)
         reward_bottom_knockdown = jp.where(is_failure, -100.0, 0.0)
         reward_knockdown = top_reward_knockdown + reward_bottom_knockdown
-        # reward_knockdown = jp.where(is_success, 100.0, 0.0)
-        # reward_knockdown = 0.0
         
         # Heavy penalty for instability
         # penalty_stability = (jp.square(move_0) + jp.square(move_1)) * -5.0
@@ -411,8 +352,7 @@ class CobotEnv(PipelineEnv):
         }
 
         # update info
-        info = state.info
-        info = info.copy()
+        info = state.info.copy()
         info['prev_ctrl'] = final_ctrl
         info['prev_action'] = action
         obs = self._get_obs(data, info)
@@ -420,12 +360,6 @@ class CobotEnv(PipelineEnv):
         return state.replace(pipeline_state=data, obs=obs, reward=reward, done=done, metrics=metrics, info=info)        
 
     def _get_obs(self, data: mjx.Data, info: dict) -> jp.ndarray:
-        # block_2_pos = data.qpos[21:24]
-        # return jp.concatenate([data.qpos[:7], data.qvel[:7], block_2_pos])
-    
-        # Transform the raw robot qpos (7) into the continuous format (11)
-        # using your existing ctrl_to_action logic
-        # qpos_arm_smooth = self.ctrl_to_action(data.qpos[:7])
         qpos_arm_smooth = data.qpos[:7]
         prev_action = info['prev_action']
         
@@ -452,38 +386,7 @@ class CobotEnv(PipelineEnv):
 # Register the environment
 envs.register_environment('cobot_reach', CobotEnv)
 
-import wandb
-
-config = {
-    "num_timesteps": 40_000_000,           # 40_000_000
-    "num_evals": 20,
-    "reward_scaling": 0.01,               # Lowered to stabilize Critic
-    "episode_length": 500, # here
-    "normalize_observations": True,
-    "entropy_cost": 5e-3,
-    "action_repeat": 1,
-    "unroll_length": 20,                  # Increased for better GAE estimation
-    "num_minibatches": 32,                # Increased for better gradient stochastics
-    "num_updates_per_batch": 4,           # Lowered to prevent "over-correcting" on bad data
-    "discounting": 0.99,                  # Lowered to focus the Critic's horizon
-    "learning_rate": 3e-4,                # 3e-4
-    "num_envs": 1024,                     # Moderate parallelization for stability
-    "batch_size": 512,
-    "seed": 42,
-}
-
-wandb.init(
-    project="cobot-reach",
-    config=config,
-)
-
-train_fn = functools.partial(
-    ppo.train,
-    **config,
-    # save_checkpoint_path = "playground_ppo_checkpoint",
-)
-
-def progress_callback(num_steps, metrics):
+def progress_callback(num_steps, metrics, wandb_run):
     now = datetime.now().strftime('%H:%M:%S')
     
     # Use .get(key, default) to prevent KeyErrors
@@ -496,9 +399,10 @@ def progress_callback(num_steps, metrics):
     table_penalty = metrics.get('eval/episode_table_penalty', 0.0)
     dist_to_block = metrics.get('eval/episode_dist_to_block', 0.0)
     action_rate_penalty = metrics.get('eval/episode_reward_action_rate', 0.0)
+    success = metrics.get('eval/episode_success', 0.0)
 
     print(f"[{now}] Steps: {num_steps:>10} | Reward: {reward:>10.2f} | Loss: {loss:>10.4f} | SPS: {sps:>8.0f} | Top KD: {top_knockdown:>6.2f} | Bot KD: {bot_knockdown:>6.2f} | Displace: {top_displace:>6.3f} | Table Penalty: {table_penalty:>6.3f} | Dist to Block: {dist_to_block:>6.3f}")
-    wandb.log({
+    wandb_run.log({
         'eval/episode_reward': reward,
         'training/total_loss': loss,
         'training/sps': sps,
@@ -508,49 +412,143 @@ def progress_callback(num_steps, metrics):
         'eval/episode_table_penalty': table_penalty,
         'eval/episode_dist_to_block': dist_to_block,
         'eval/episode_reward_action_rate': action_rate_penalty,
+        'eval/episode_success': success,
     })
 
-def policy_video_callback(num_steps, make_inference_fn, params):
-    now = datetime.now().strftime('%H:%M:%S')
+def policy_video_callback(num_steps, make_inference_fn, params, wandb_run):
     eval_env = envs.get_environment('cobot_reach')
-    inference_fn = jax.jit(make_inference_fn(params))
-    jit_inference_fn = jax.jit(inference_fn)
-
+    jit_inference_fn = jax.jit(make_inference_fn(params))
     jit_reset = jax.jit(eval_env.reset)
     jit_step = jax.jit(eval_env.step)
 
-    # initialize the state
     rng = jax.random.PRNGKey(0)
     state = jit_reset(rng)
-    rollout = [state.pipeline_state]
-    print("obs shape", state.obs.shape)
-
-    # grab a trajectory
+    
+    pipeline_rollout = [state.pipeline_state]
+    is_done_at = None # Track exactly when we finished
+    
     n_steps = 500
-    render_every = 2
+    extra_steps = 50 # Render 1 second of extra footage after success
 
     for i in range(n_steps):
         act_rng, rng = jax.random.split(rng)
         ctrl, _ = jit_inference_fn(state.obs, act_rng)
         state = jit_step(state, ctrl)
-        rollout.append(state.pipeline_state)
+        pipeline_rollout.append(state.pipeline_state)
 
-        # print the reward
-        # print(f"Step {i+1}/{n_steps} | Reward: {state.reward:.3f} | Distance: {state.metrics['dist']:.3f}")
+        if state.done and is_done_at is None:
+            is_done_at = i
+            # Keep looping for extra_steps, but stop if we hit n_steps
+            n_steps = min(i + extra_steps, n_steps) 
 
-        if state.done:
-            print("Done", len(rollout), n_steps)
-            break
+    # 1. Render the raw pixels
+    # Brax returns a list of (H, W, 3) numpy arrays
+    frames = eval_env.render(pipeline_rollout, camera="sideview")
+    final_success = float(state.metrics['success'])
+    color = (0, 255, 0) if final_success > 0.5 else (255, 0, 0)
 
-    media.write_video(f"videos/policy_video_{num_steps}.mp4", eval_env.render(rollout[::render_every], camera="sideview"), fps=1.0 / eval_env.dt / render_every)
-    wandb.log({f'policy_video': wandb.Video(f"videos/policy_video_{num_steps}.mp4", fps=30, format="mp4")})
+    # 2. "Draw" the DONE indicator on the extra frames
+    if is_done_at is not None:
+        for f_idx in range(is_done_at, len(frames)):
+            # Draw a simple red square in the top-left corner (50x50 pixels)
+            # This is much faster than true text rendering in a headless environment
+            frames[f_idx][10:60, 10:60, :] = color 
+
+    # 3. Save and Log
+    video_file = f"{video_path}/policy_video_{num_steps}.mp4"
+    media.write_video(video_file, frames, fps=1.0 / eval_env.dt)
+    
+    wandb_run.log({
+        'policy_video': wandb.Video(video_file, fps=30, format="mp4"),
+    })
+
+def domain_randomize(sys, rng):
+    table_geom_idx  = mujoco.mj_name2id(sys.mj_model, mujoco.mjtObj.mjOBJ_GEOM, 'table_top')
+
+    @jax.vmap
+    def rand(rng):
+        # Randomize Table Height
+        key1, key2 = jax.random.split(rng)
+        new_z = jax.random.uniform(key1, (), minval=0.62, maxval=0.82)
+        new_geom_pos = sys.geom_pos.at[table_geom_idx, 2].set(new_z)
+        
+        # Randomize Friction
+        friction = jax.random.uniform(key2, (), minval=0.5, maxval=1.5)
+        new_friction = sys.geom_friction.at[:, 0].set(friction)
+        
+        return new_geom_pos, new_friction
+
+    batch_geom_pos, batch_friction = rand(rng)
+    in_axes = jax.tree_util.tree_map(lambda x: None, sys)
+    in_axes = in_axes.tree_replace({
+        'geom_pos': 0,
+        'geom_friction': 0,
+    })
+    sys = sys.tree_replace({
+        'geom_pos': batch_geom_pos,
+        'geom_friction': batch_friction,
+    })
+
+    return sys, in_axes
 
 if __name__ == "__main__":
 
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting Training...")
-    make_inference_fn, params, metrics = train_fn(environment=envs.get_environment('cobot_reach'), progress_fn=progress_callback, policy_params_fn=policy_video_callback)
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Training Complete!")
+    # --- COMPILE ---
+    ASSETS_DIR = "/home/luisamao/villa_spaces/sim_ws/src/mujoco_cobot/assets"
+    ROBOT_XML = "/home/luisamao/villa_spaces/sim_ws/robot_simple_collision.xml"
+    TABLE_XML = "/home/luisamao/villa_spaces/sim_ws/table.xml"
+    xml_string = prepare_cobot_model(ROBOT_XML, TABLE_XML, ASSETS_DIR)
+    mj_model = mujoco.MjModel.from_xml_string(xml_string)
+    mj_data = mujoco.MjData(mj_model)
 
+    print(f"Success! Model compiled with {mj_model.ngeom} geometries.")
+    # renderer = mujoco.Renderer(mj_model)
+
+    print(f"\nModel loaded successfully!")
+    print(f"  - DOFs: {mj_model.nv}")
+    print(f"  - Bodies: {mj_model.nbody}")
+    print(f"  - Joints: {mj_model.njnt}")
+    print(f"  - Actuators: {mj_model.nu}")
+
+    # make partial functions for the training loop
+    config = {
+        "num_timesteps": 40_000_000,           # 40_000_000
+        "num_evals": 20,
+        "reward_scaling": 0.01,               # Lowered to stabilize Critic
+        "episode_length": 500, # here
+        "normalize_observations": True,
+        "entropy_cost": 5e-3,
+        "action_repeat": 1,
+        "unroll_length": 20,                  # Increased for better GAE estimation
+        "num_minibatches": 32,                # Increased for better gradient stochastics
+        "num_updates_per_batch": 4,           # Lowered to prevent "over-correcting" on bad data
+        "discounting": 0.99,                  # Lowered to focus the Critic's horizon
+        "learning_rate": 3e-4,                # 3e-4
+        "num_envs": 2048,                     # Moderate parallelization for stability
+        "batch_size": 512,
+        "seed": 42,
+    }
+
+    wandb_run = wandb.init(
+        project="cobot-reach",
+        config=config,
+    )
+
+    run_name = wandb_run.name
+    video_path = f"videos/{run_name}"
+    os.makedirs(video_path, exist_ok=True)
+
+    train_fn = functools.partial(
+        ppo.train,
+        **config,
+        # save_checkpoint_path = "playground_ppo_checkpoint",
+    )
+    custom_progress_callback = functools.partial(progress_callback, wandb_run=wandb_run)
+    custom_policy_video_callback = functools.partial(policy_video_callback, wandb_run=wandb_run)
+
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting Training...")
+    make_inference_fn, params, metrics = train_fn(environment=envs.get_environment('cobot_reach'), progress_fn=custom_progress_callback, policy_params_fn=custom_policy_video_callback, randomization_fn = domain_randomize)
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Training Complete!")
 
     env_name = "cobot_reach"
     eval_env = envs.get_environment(env_name)
