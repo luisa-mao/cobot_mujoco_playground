@@ -22,6 +22,7 @@ import functools
 import copy
 from datetime import datetime
 
+import wandb
 
 
 # from mujoco_playground.config import dm_control_suite_params
@@ -31,13 +32,13 @@ from datetime import datetime
 
 # 1. Load your env
 env_cfg = default_config()
-env_cfg['vision_config']['nworld'] = 4
+env_cfg['vision_config']['nworld'] = 1024
 print("num envs", env_cfg['vision_config']['nworld'])
 env = CobotEnv(config=env_cfg)
 
 # # 2. Setup Eval Env (often with a different number of worlds)
 eval_env_cfg = copy.deepcopy(env_cfg)
-eval_env_cfg['vision_config']['nworld'] = 4
+eval_env_cfg['vision_config']['nworld'] = 64 # 256
 print("eval_env_cfg num envs", eval_env_cfg['vision_config']['nworld'])
 eval_env = CobotEnv(config=eval_env_cfg)
 
@@ -48,23 +49,50 @@ num_envs = env_cfg['vision_config']['nworld']
 eval_num_envs = eval_env_cfg['vision_config']['nworld']
 print("here", num_envs, eval_num_envs)
 
-def progress_callback(num_steps, metrics):
-    print("progress function called")
+def progress_callback(num_steps, metrics, wandb_run):
     now = datetime.now().strftime('%H:%M:%S')
     
-    # Use .get(key, default) to prevent KeyErrors
-    reward = metrics.get('eval/episode_reward', 0.0)
+    # Standard PPO metrics
+    reward = metrics.get('eval/episode_reward/reward', 0.0)
     loss = metrics.get('training/total_loss', 0.0)
     sps = metrics.get('training/sps', 0.0)
-    top_knockdown = metrics.get('eval/episode_reward_top_knockdown', 0.0)
-    bot_knockdown = metrics.get('eval/episode_reward_bottom_knockdown', 0.0)
-    top_displace = metrics.get('eval/episode_top_displace', 0.0)
-    table_penalty = metrics.get('eval/episode_table_penalty', 0.0)
-    dist_to_block = metrics.get('eval/episode_dist_to_block', 0.0)
-    action_rate_penalty = metrics.get('eval/episode_reward_action_rate', 0.0)
-    success = metrics.get('eval/episode_success', 0.0)
+    
+    # Custom environment metrics
+    # Note the "reward/" prefix is part of your original key name
+    top_knockdown = metrics.get('eval/episode_reward/reward_top_knockdown', 0.0)
+    bot_knockdown = metrics.get('eval/episode_reward/reward_bottom_knockdown', 0.0)
+    top_displace  = metrics.get('eval/episode_reward/top_displace', 0.0)
+    table_penalty = metrics.get('eval/episode_reward/table_penalty', 0.0)
+    dist_to_block = metrics.get('eval/episode_reward/dist_to_block', 0.0)
+    action_rate   = metrics.get('eval/episode_reward/reward_action_rate', 0.0)
+    success       = metrics.get('eval/episode_success', 0.0)
+    print(f"[{now}] Steps: {num_steps:>10} | Reward: {reward:>10.2f} | Loss: {loss:>10.4f} | SPS: {sps:>8.0f} | Top KD: {top_knockdown:>6.2f} | Bot KD: {bot_knockdown:>6.2f} | Displace: {top_displace:>6.3f} | Table Penalty: {table_penalty:>6.3f} | Dist to Block: {dist_to_block:>6.3f} | Action rate: {action_rate:>6.3f} | Success: {success:>6.3f}")
 
-    print(f"[{now}] Steps: {num_steps:>10} | Reward: {reward:>10.2f} | Loss: {loss:>10.4f} | SPS: {sps:>8.0f} | Top KD: {top_knockdown:>6.2f} | Bot KD: {bot_knockdown:>6.2f} | Displace: {top_displace:>6.3f} | Table Penalty: {table_penalty:>6.3f} | Dist to Block: {dist_to_block:>6.3f}")
+    train_reward = metrics.get('training/episode_reward/reward', 0.0)
+    train_success = metrics.get('training/episode_success', 0.0)
+
+    train_top_knockdown = metrics.get('training/episode_reward/reward_top_knockdown', 0.0)
+    train_bot_knockdown = metrics.get('training/episode_reward/reward_bottom_knockdown', 0.0)
+    train_top_displace  = metrics.get('training/episode_reward/top_displace', 0.0)
+    train_table_penalty = metrics.get('training/episode_reward/table_penalty', 0.0)
+    train_dist_to_block = metrics.get('training/episode_reward/dist_to_block', 0.0)
+    train_action_rate   = metrics.get('training/episode_reward/reward_action_rate', 0.0)
+
+    print(f"[{now}] Train Steps: {num_steps:>10} | Reward: {train_reward:>10.2f} | Loss: {loss:>10.4f} | SPS: {sps:>8.0f} | Top KD: {train_top_knockdown:>6.2f} | Bot KD: {train_bot_knockdown:>6.2f} | Displace: {train_top_displace:>6.3f} | Table Penalty: {train_table_penalty:>6.3f} | Dist to Block: {train_dist_to_block:>6.3f} | Action rate: {train_action_rate:>6.3f} | Success: {train_success:>6.3f}")
+
+    wandb_run.log({
+        'eval/episode_reward': reward,
+        'training/total_loss': loss,
+        'training/sps': sps,
+        'eval/episode_reward_top_knockdown': top_knockdown,
+        'eval/episode_reward_bottom_knockdown': bot_knockdown,
+        'eval/episode_top_displace': top_displace,
+        'eval/episode_table_penalty': table_penalty,
+        'eval/episode_dist_to_block': dist_to_block,
+        'eval/episode_reward_action_rate': action_rate,
+        'eval/episode_success': success,
+    })
+
 
 import jax
 import jax.numpy as jp
@@ -72,50 +100,46 @@ import mediapy as media
 from brax.training.agents.ppo import train as ppo_utils
 import mujoco
 
-def policy_video_callback(num_steps, make_inference_fn, params):
-    # 1. Setup Inference Environment (64 worlds for evaluation)
-    # We use a deepcopy or a new ConfigDict to avoid mutating the training config
-    infer_env_cfg = config_dict.ConfigDict(env_cfg)
-    infer_env_cfg.vision_config.nworld = 64
-    
-    # Initialize directly from the class as requested
+def policy_video_callback(num_steps, make_inference_fn, params, wandb_run, num_envs = 4
+):
+    infer_env_cfg = default_config()
+    infer_env_cfg.vision_config.nworld = num_envs
+    episode_length = infer_env_cfg.episode_length
+
+    # Use the RAW environment class
     infer_env = CobotEnv(config=infer_env_cfg)
-    
-    # Wrap for Brax training compatibility (handles episode length and action repeat)
-    wrapped_infer_env = wrapper.wrap_for_brax_training(
-        infer_env,
-        episode_length=env_cfg.episode_length, # or ppo_params.episode_length
-        action_repeat=1,
-    )
+    # wrapped_infer_env = wrapper.wrap_for_brax_training(
+    #     infer_env,
+    #     episode_length=episode_length,
+    #     action_repeat=1,
+    # )
 
-    # 2. JIT the specific functions for this inference run
-    jit_inference_fn = jax.jit(make_inference_fn(params, deterministic=True))
+    jit_inference_fn = jax.jit(make_inference_fn(params, deterministic=False)) # here
+    jit_reset = jax.jit(jax.vmap(infer_env.reset))
+    jit_step = jax.jit(jax.vmap(infer_env.step))
     
-    # 3. Setup Parallel Reset
-    rng = jax.random.split(jax.random.PRNGKey(42), 64)
-    reset_states = jax.jit(wrapped_infer_env.reset)(rng)
-
-    # 4. Create the 'Skeleton' Trajectory (Hollow Container)
-    # This prevents OOM by only storing what MuJoCo needs to render
+    rng = jax.random.PRNGKey(num_steps)
+    rng_batch = jax.random.split(rng, num_envs) 
+    reset_states = jit_reset(rng_batch)
+    
+    # 4. Setup Skeletons
     empty_data = reset_states.data.__class__(
         **{k: None for k in reset_states.data.__annotations__}
     )
     empty_traj = reset_states.__class__(
         **{k: None for k in reset_states.__annotations__}
     )
-    empty_traj = empty_traj.replace(data=empty_data)
+    empty_traj = empty_traj.replace(data=empty_data, metrics={})
 
-    # 5. Define the Step Function for lax.scan
-    def step(carry, _):
+    # 5. Define the Step Function
+    def step_fn(carry, _):
         state, rng = carry
         rng, act_key = jax.random.split(rng)
-        act_keys = jax.random.split(act_key, 64)
+        # act_keys = jax.random.split(act_key, num_envs)
         
-        # Inference for all 64 envs
-        act, _ = jit_inference_fn(state.obs, act_keys)
-        state = wrapped_infer_env.step(state, act)
+        act, _ = jit_inference_fn(state.obs, act_key)
+        state = jit_step(state, act)
         
-        # Selective data logging for rendering
         traj_data = empty_traj.tree_replace({
             "data.qpos": state.data.qpos,
             "data.qvel": state.data.qvel,
@@ -125,74 +149,103 @@ def policy_video_callback(num_steps, make_inference_fn, params):
             "data.mocap_quat": state.data.mocap_quat,
             "data.xfrc_applied": state.data.xfrc_applied,
         })
+        # Track both success and the overall done flag
+        traj_data = traj_data.replace(
+            metrics={'success': state.metrics['success']},
+            done=state.done
+        )
         return (state, rng), traj_data
 
-    # 6. Execute Rollout (GPU)
-    @jax.jit
-    def do_rollout(state, rng):
-        _, traj = jax.lax.scan(
-            step, (state, rng), None, length=env_cfg.episode_length
-        )
-        return traj
+    # 6. Execute Rollout
+    _, traj_stacked = jax.lax.scan(
+        step_fn, (reset_states, rng), None, length=episode_length
+    )
 
-    traj_stacked = do_rollout(reset_states, jax.random.PRNGKey(0))
+    # 7. Post-Process (World 0)
+    traj_world0 = jax.tree.map(lambda x: x[:, 0], traj_stacked)
     
-    # 7. Post-Process: Move axis from (Time, Batch) -> (Batch, Time)
-    traj_stacked = jax.tree.map(lambda x: jp.moveaxis(x, 0, 1), traj_stacked)
+    # Move signals to CPU for logic processing
+    success_signal = jax.device_get(traj_world0.metrics['success'])
+    done_signal = jax.device_get(traj_world0.done)
+    
+    # Find the FIRST index where 'done' is true
+    done_indices = jp.where(done_signal > 0.5)[0]
+    is_done_at = int(done_indices[0]) if len(done_indices) > 0 else None
 
-    # Pick the first environment (World 0) to render
-    traj_world0 = jax.tree.map(lambda x: x[0], traj_stacked)
-    
-    # Convert the JAX Tensors back into a Python list of individual states
+    # Convert JAX Tensors to list for MuJoCo renderer
     rollout_list = [
         jax.tree.map(lambda x, i=i: jax.device_get(x[i]), traj_world0)
-        for i in range(env_cfg.episode_length)
+        for i in range(episode_length)
     ]
 
-    # 8. Render and Save
+    # 8. Render
     render_every = 2
     fps = 1.0 / infer_env.dt / render_every
     
-    # MUJOCO VISUAL OPTIONS
-    scene_option = mujoco.MjvOption()
-    scene_option.flags[mujoco.mjtVisFlag.mjVIS_TRANSPARENT] = False
-
     frames = infer_env.render(
         rollout_list[::render_every], 
         height=480, width=640, 
-        scene_option=scene_option
+        camera="sideview"
     )
     
-    media.write_video(f"step_{num_steps}.mp4", frames, fps=fps)
-    print(f"Logged video for step {num_steps}")
+    # 9. Dynamic Success Marker
+    # Determine the color based on the final frame's success metric
+    final_is_success = success_signal[-1] > 0.5
+    marker_color = [0, 255, 0] if final_is_success else [255, 0, 0]
 
+    if is_done_at is not None:
+        # Convert the physics index to the rendered frames index
+        render_done_idx = is_done_at // render_every
+        for f_idx in range(render_done_idx, len(frames)):
+            # Draw the square only from the moment the task was 'done'
+            frames[f_idx][10:60, 10:60, :] = marker_color
 
+    video_path = f"videos/{wandb_run.name}"
+    os.makedirs(video_path, exist_ok=True)
+    video_file = f"{video_path}/step_{num_steps}.mp4"
+    media.write_video(video_file, frames, fps=fps)
+    print(f"Logged video for step {num_steps}. Success: {final_is_success}")
+    wandb_run.log({
+        'policy_video': wandb.Video(video_file, fps=30, format="mp4"),
+    })
+    
 # # 3. Define the Training Function
+# Create the training configuration
+training_config = {
+    "num_timesteps": 40_000_000,
+    "num_evals": 20_000, # here
+    "reward_scaling": 0.01,
+    "episode_length": env_cfg.episode_length,
+    "normalize_observations": True,
+    "action_repeat": 1,
+    "unroll_length": 10,
+    "num_minibatches": 32,
+    "num_updates_per_batch": 4,
+    "discounting": 0.99,
+    "learning_rate": 3e-4,
+    "entropy_cost": 5e-3,
+    "num_envs": num_envs,
+    "num_eval_envs": eval_num_envs,
+    "batch_size": 512,
+    "network_factory": network_factory,
+    "seed": 42,
+    "max_devices_per_host": 1,
+    "clipping_epsilon": 0.2,
+}
+
+wandb_run = wandb.init(
+    project="cobot-reach-mujoco-playground",
+    config=training_config,
+)
+
+wandb_progress_callback = functools.partial(progress_callback, wandb_run=wandb_run)
+wandb_policy_video_callback = functools.partial(policy_video_callback, wandb_run=wandb_run, num_envs = training_config['num_eval_envs'])
+
 train_fn = functools.partial(
     ppo.train,
-    num_timesteps=1_000,
-    num_evals=20,
-    reward_scaling=0.01,
-    episode_length=env_cfg.episode_length,
-    normalize_observations=True,
-    action_repeat=1,
-    unroll_length=10,
-    num_minibatches=32,
-    num_updates_per_batch=4,
-    discounting=0.99,
-    learning_rate=3e-4,
-    entropy_cost=5e-3,
-    num_envs=num_envs,
-    num_eval_envs=eval_num_envs,
-    batch_size=4, #512
-    network_factory=network_factory, # Use the CNN factory
-    seed=42,
-    max_devices_per_host = 1,
-    progress_fn = progress_callback,
-    policy_params_fn = policy_video_callback,
-    clipping_epsilon=0.2,
-    # clipping_epsilon_value=0.2,
-    # use_pmap_on_reset = False
+    progress_fn = wandb_progress_callback,
+    policy_params_fn = wandb_policy_video_callback,
+    **training_config,
 )
 
 # # 4. RUN
@@ -201,3 +254,5 @@ make_inference_fn, params, metrics = train_fn(
     eval_env=eval_env,
     wrap_env_fn=wrapper.wrap_for_brax_training, # Essential for MjxEnv
 )
+
+# todo: domain randomization. then try with vision

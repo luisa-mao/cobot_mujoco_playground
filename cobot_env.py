@@ -30,16 +30,16 @@ def default_vision_config() -> config_dict.ConfigDict:
 
 def default_config() -> config_dict.ConfigDict:
   return config_dict.create(
-      ctrl_dt=0.05,
-      sim_dt=0.002,
-      episode_length=1000,
+      ctrl_dt=0.02,
+      sim_dt=0.0005,
+      episode_length=250,
       action_repeat=1,
       vision=False,
       vision_config=default_vision_config(),
       impl="warp",
-      naconmax=50_000,
-      njmax=500,
-      naccdmax=2500, # where to put this one
+      naconmax=20_000,
+      njmax=30_000,
+      naccdmax=5000, # where to put this one
   )
 
 def prepare_cobot_model(robot_xml_path, table_xml_path, assets_dir, num_blocks=3):
@@ -62,7 +62,7 @@ def prepare_cobot_model(robot_xml_path, table_xml_path, assets_dir, num_blocks=3
     for i in range(num_blocks):
         # Calculate Z: surface + (2 * half_height * index) + offset
         # We add 0.01 initial gap from table, then 0.001 between blocks
-        z_pos = table_surface_z + (block_size[2] * 2 * i) + block_size[2] + 0.01 + (i * 0.001)
+        z_pos = table_surface_z + (block_size[2] * 2 * i) + block_size[2] + 0.01 + (i * 0.005)
         
         block_name = f'block_{i}'
         block_pos = [base_x, base_y, z_pos]
@@ -70,21 +70,22 @@ def prepare_cobot_model(robot_xml_path, table_xml_path, assets_dir, num_blocks=3
         # Create unique body
         block_body = ET.SubElement(worldbody, 'body', name=block_name, 
                                    pos=' '.join(map(str, block_pos)), childclass='interactive')
-        
+
         # Each block needs its own freejoint to move independently
-        ET.SubElement(block_body, 'freejoint', name=f'joint_{block_name}')
+        # ET.SubElement(block_body, 'freejoint', name=f'joint_{block_name}')
+        ET.SubElement(block_body, 'joint', type='free', name=f'joint_{block_name}')
         
         # Add geom with stable manipulation parameters
         ET.SubElement(block_body, 'geom', name=f'geom_{block_name}', type='box', 
                       size=' '.join(map(str, block_size)), 
                       rgba='1 0 0 1' if i % 2 == 0 else '0 1 0 1', # Alternate colors
-                      mass='0.1', friction='1.5 0.01 0.0001', condim='4',
-                      solref='0.02 1.0', solimp='0.9 0.95 0.001')
+                      mass='0.1', friction='1.0 0.01 0.0001', condim='4',
+                      solimp="0.9 0.95 0.001", solref="0.01 1.0")
 
     # 4. Inject Stability Class & Missing Materials
     if root.find(".//default[@class='interactive']") is None:
         interactive = ET.SubElement(default_elem, 'default', {'class': 'interactive'})
-        ET.SubElement(interactive, 'joint', armature='0.01', damping='0.05')
+        ET.SubElement(interactive, 'joint', armature='0.05', damping='1.0', frictionloss='0.01')
 
     if root.find(".//material[@name='gym_floor_mat']") is None:
         ET.SubElement(asset_elem, 'texture', name='gym_floor_tex', type='2d', builtin='checker', 
@@ -115,18 +116,17 @@ class CobotEnv(mjx_env.MjxEnv):
         # model stuff
         self._xml_string = prepare_cobot_model(ROBOT_XML, TABLE_XML, ASSETS_DIR)
         self._mj_model = mujoco.MjModel.from_xml_string(self._xml_string)
-        print(f"\nModel loaded successfully!")
-        mj_model = self._mj_model
-        print(f"  - DOFs: {mj_model.nv}")
-        print(f"  - Bodies: {mj_model.nbody}")
-        print(f"  - Joints: {mj_model.njnt}")
-        print(f"  - Actuators: {mj_model.nu}")
+        # print(f"\nModel loaded successfully!")
+        # mj_model = self._mj_model
+        # print(f"  - DOFs: {mj_model.nv}")
+        # print(f"  - Bodies: {mj_model.nbody}")
+        # print(f"  - Joints: {mj_model.njnt}")
+        # print(f"  - Actuators: {mj_model.nu}")
         self._mj_model.opt.timestep = self.sim_dt
         self._mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
-        mj_model.opt.iterations = 30
-        mj_model.opt.ls_iterations = 10
-        self._mj_model.opt.ccd_iterations = 70
-        # self._mj_model.opt.naccdmax = 512 
+        self._mj_model.opt.iterations = 60
+        self._mj_model.opt.ls_iterations = 25
+        self._mj_model.opt.ccd_iterations = 600
         self._mjx_model = mjx.put_model(self._mj_model, impl=self._config.impl)
         self._table_idx = mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_GEOM, 'table_top')
         self._ee_site_idx = mujoco.mj_name2id(
@@ -146,10 +146,6 @@ class CobotEnv(mjx_env.MjxEnv):
         qpos = jp.zeros(self.mjx_model.nq) 
         qvel = jp.zeros(self.mjx_model.nv) 
 
-        # robot
-        robot_home = jp.array([0.2, 1.019, 0.144, .6, -0.221, 0.5, -0.886])
-        qpos = qpos.at[:7].set(robot_home)
-
         # table and blocks
         table_surface_z = self.mjx_model.geom_pos[self._table_idx, 2] + 0.02
         block_half_height = 0.03
@@ -166,7 +162,7 @@ class CobotEnv(mjx_env.MjxEnv):
         block_curr_y = block_base_y + xy_offset[1]
         for i in range(num_blocks):
             start_idx = 7 + (i * 7)
-            z_pos = table_surface_z + (block_half_height * 2 * i) + block_half_height + 0.02 + (i * 0.001)
+            z_pos = table_surface_z + (block_half_height * 2 * i) + block_half_height + 0.02 + (i * 0.01)
             block_state = jp.array([block_curr_x, block_curr_y, z_pos, 1.0, 0.0, 0.0, 0.0])
             qpos = qpos.at[start_idx : start_idx + 7].set(block_state)
 
@@ -186,8 +182,15 @@ class CobotEnv(mjx_env.MjxEnv):
             return mjx.step(self.mjx_model, val)
         
         data = jax.lax.fori_loop(0, 200, settle_fn, data)
-        data = mjx.forward(self.mjx_model, data)
 
+        # set robot after settling
+        # robot
+        robot_home = jp.array([0.2, 1.019, 0.144, .6, -0.221, 0.7, -0.886])
+        new_qpos = data.qpos.at[:7].set(robot_home)
+        new_qvel = data.qvel.at[:7].set(jp.zeros(7))
+        data = data.replace(qpos=new_qpos, qvel=new_qvel)
+        data = mjx.forward(self.mjx_model, data)
+        data = mjx.forward(self.mjx_model, data)
         # todo: randomize block poses
 
         # metrics
@@ -225,11 +228,61 @@ class CobotEnv(mjx_env.MjxEnv):
         return state
     
     def step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
-        ctrl = self._get_ctrl(state.data, action)
-        data = mjx_env.step(self.mjx_model, state.data, ctrl, self.n_substeps)
-        r, done, metrics = self._get_reward(data, action, state.info, state.metrics) # todo: implement
+        # jax.debug.callback(lambda a: print("!!! Action NaN !!!") if jp.any(jp.isnan(a)) else None, action)
+        # ctrl = self._get_ctrl(state.data, action)
+        # data = mjx_env.step(self.mjx_model, state.data, ctrl, self.n_substeps)
+        # is_phys_nan = jp.any(jp.isnan(data.qpos)) | jp.any(jp.isnan(data.qvel))
+        # jax.lax.cond(is_phys_nan, 
+        #              lambda d: jax.debug.callback(lambda x: print(f"!!! Physics NaN at time {x} !!!"), d.time), 
+        #              lambda d: None, data)
+        # jax.debug.callback(
+        #     lambda a: print(f"!!! Action NaN !!!\n{a}") if jp.any(jp.isnan(a)) else None, 
+        #     action
+        # )
+        # jax.debug.print("action {a}", a = action)
 
+        ctrl = self._get_ctrl(state.data, action)
+        # jax.debug.print("ctrl {a}", a = ctrl)
+        data = mjx_env.step(self.mjx_model, state.data, ctrl, self.n_substeps)
+
+        # 2. Physics Check: Print "Physics NaN", the timestamp, and the full qpos array
+        # is_phys_nan = jp.any(jp.isnan(data.qpos)) | jp.any(jp.isnan(data.qvel))
+        
+        # jax.lax.cond(
+        #     is_phys_nan, 
+        #     # We pass both time and qpos to the callback
+        #     lambda d: jax.debug.callback(
+        #         lambda t, q: print(f"!!! Physics NaN at time {t} !!!\nQPOS: {q}"), 
+        #         d.time, d.qpos
+        #     ), 
+        #     lambda d: None, 
+        #     data
+        # )
+        # jax.debug.print("physics {a}", a = data.qpos)
+        # r, done, metrics = self._get_reward(data, action, state.info, state.metrics) # todo: implement
+
+        # obs = self._get_obs(data, state.info)
+
+        r, done, metrics = self._get_reward(data, action, state.info, state.metrics)
+        
+        # Check if reward is NaN or if any value in the metrics dict is NaN
+        # is_reward_nan = jp.isnan(r)
+        # We use tree_leaves to flatten the metrics dict for a quick check
+        # is_metrics_nan = jp.any(jp.array([jp.any(jp.isnan(x)) for x in jax.tree_util.tree_leaves(metrics)]))
+        
+        # jax.lax.cond(is_reward_nan | is_metrics_nan,
+        #              lambda _: jax.debug.callback(lambda: print("!!! Reward/Metrics NaN detected !!!")),
+        #              lambda _: None, None)
+
+        # 4. Observation Check
         obs = self._get_obs(data, state.info)
+        # is_obs_nan = jp.any(jp.isnan(obs))
+        
+        # jax.lax.cond(is_obs_nan,
+        #              lambda o: jax.debug.callback(lambda x: print(f"!!! Observation NaN !!!\n{x}"), o),
+        #              lambda o: None, obs)
+        # jax.debug.print("obs {a}", a = obs)
+
         # render_data = mjx.refit_bvh(self.mjx_model, data, self._rc_pytree)
         # out = mjx.render(self.mjx_model, render_data, self._rc_pytree)
         # rgb = mjx.get_rgb(self._rc_pytree, 0, out[0])
@@ -243,7 +296,14 @@ class CobotEnv(mjx_env.MjxEnv):
         info = dict(state.info)
         info['prev_ctrl'] = ctrl
         info['prev_action'] = action
-        return mjx_env.State(data, obs, r, done, metrics, info)
+        # return mjx_env.State(data, obs, r, done, metrics, info)
+        return state.replace(
+            data=data, 
+            obs=obs, 
+            reward=r,      # Note: The field name in State is 'reward', not 'r'
+            done=done, 
+            metrics=metrics
+        )
 
 
     def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> jax.Array:
@@ -288,10 +348,12 @@ class CobotEnv(mjx_env.MjxEnv):
 
         move_0 = jp.linalg.norm(pos_0[:2] - pos_0_init[:2])
         move_1 = jp.linalg.norm(pos_1[:2] - pos_1_init[:2])
-        is_failure = (move_0 > 0.03) | (move_1 > 0.03)
+        move_2 = jp.linalg.norm(pos_2[:2] - pos_2_init[:2])
+        # is_failure = (move_0 > 0.03) | ((move_1 > 0.03) & ((pos_2_init[2] - pos_2[2]) > 0.03))
+        is_failure = (move_0 > 0.03) | (((pos_1_init[2] - pos_1[2]) > 0.03))
 
         z_dropped = pos_2_init[2] - pos_2[2]
-        is_success = z_dropped > 0.04 # Fell at least 8cm down
+        is_success = (z_dropped > 0.06) & (move_2 > 0.03) # Fell at least 8cm down and moved in xy axis
 
         safety_margin = 0.05 
         table_z = self.mjx_model.geom_pos[self._table_idx, 2]
@@ -303,7 +365,7 @@ class CobotEnv(mjx_env.MjxEnv):
         reward_knockdown = top_reward_knockdown + reward_bottom_knockdown
 
         done = (is_success | is_failure).astype(jp.float32)
-        penalty_action_rate = jp.linalg.norm(action * 0.01) * -0.5
+        penalty_action_rate = jp.linalg.norm(action * 0.01) * -2.0
         dist_to_top_block = jp.linalg.norm(hand_pos - pos_2)
         reward_approach = -dist_to_top_block
         
