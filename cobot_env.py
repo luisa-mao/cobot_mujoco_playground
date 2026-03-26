@@ -21,10 +21,10 @@ def default_vision_config() -> config_dict.ConfigDict:
       cam_res=(256, 256),
       use_textures=True,
       use_shadows=False,
-      render_rgb=(True, True, True, True),
-      render_depth=(True, True, True, True),
+      render_rgb=(True, True),
+      render_depth=(False, False),
       enabled_geom_groups=[0, 1, 2, 3],
-      cam_active=(True, True, True, True), # [sidecam, topdown, basecam, handcam] ?
+      cam_active=(False, False, True, True), # [sidecam, topdown, basecam, handcam] ?
   )
 
 
@@ -40,6 +40,7 @@ def default_config() -> config_dict.ConfigDict:
       naconmax=20_000,
       njmax=30_000,
       naccdmax=5000,
+      num_blocks = 3,
   )
 
 def prepare_cobot_model(robot_xml_path, table_xml_path, assets_dir, num_blocks=3):
@@ -111,10 +112,10 @@ class CobotEnv(mjx_env.MjxEnv):
     ):
         super().__init__(config, config_overrides=config_overrides)
         self._vision = self._config.vision
-        self._config.episode_length = 250
 
         # model stuff
-        self._xml_string = prepare_cobot_model(ROBOT_XML, TABLE_XML, ASSETS_DIR)
+        self._num_blocks: int = self._config.num_blocks
+        self._xml_string = prepare_cobot_model(ROBOT_XML, TABLE_XML, ASSETS_DIR, num_blocks = self._num_blocks)
         self._mj_model = mujoco.MjModel.from_xml_string(self._xml_string)
         # print(f"\nModel loaded successfully!")
         # mj_model = self._mj_model
@@ -143,8 +144,8 @@ class CobotEnv(mjx_env.MjxEnv):
                 **vision_kwargs
             )
             self._rc_pytree = self._rc.pytree()
-            self._wristcam_idx = 3
-            self._basecam_idx = 2
+            self._wristcam_idx = 1
+            self._basecam_idx = 0
 
     def reset(self, rng: jax.Array) -> mjx_env.State:
         qpos = jp.zeros(self.mjx_model.nq) 
@@ -153,8 +154,7 @@ class CobotEnv(mjx_env.MjxEnv):
         # table and blocks
         table_surface_z = self.mjx_model.geom_pos[self._table_idx, 2]
         block_half_height = 0.03
-        num_blocks = (self.mjx_model.nq - 7) // 7  # Calculate N based on qpos size
-
+        # num_blocks = (self.mjx_model.nq - 7) // 7  # Calculate N based on qpos size
         rng, pos_key = jax.random.split(rng)
     
         block_base_x, block_base_y = 0.8, 0.0
@@ -164,7 +164,7 @@ class CobotEnv(mjx_env.MjxEnv):
         )
         block_curr_x = block_base_x + xy_offset[0]
         block_curr_y = block_base_y + xy_offset[1]
-        for i in range(num_blocks):
+        for i in range(self._num_blocks):
             start_idx = 7 + (i * 7)
             z_pos = table_surface_z + (block_half_height * 2 * i) + block_half_height + 0.04 + (i * 0.01)
             block_state = jp.array([block_curr_x, block_curr_y, z_pos, 1.0, 0.0, 0.0, 0.0])
@@ -198,7 +198,6 @@ class CobotEnv(mjx_env.MjxEnv):
         data = mjx.forward(self.mjx_model, data)
         # todo: randomize block poses
 
-        # metrics
         metrics = {
             'reward/top_displace': jp.zeros(()),
             'reward/table_penalty': jp.zeros(()),
@@ -208,15 +207,20 @@ class CobotEnv(mjx_env.MjxEnv):
             'reward/reward': jp.zeros(()),
             'success': jp.zeros(()),
             'reward/reward_action_rate': jp.zeros(()),
+            'blocks_fell': jp.zeros(())
         }
 
         info = {
             'prev_ctrl': jp.zeros(7),
             'prev_action': jp.zeros(7),
-            'block1_init_pos': data.qpos[7:10],  # Position of the first block in the stack
-            'block2_init_pos': data.qpos[14:17],  # Position of the second block in the stack
-            'block3_init_pos': data.qpos[21:24],  # Position of the third block in the stack
+            # 'block1_init_pos': data.qpos[7:10],  # Position of the first block in the stack
+            # 'block2_init_pos': data.qpos[14:17],  # Position of the second block in the stack
+            # 'block3_init_pos': data.qpos[21:24],  # Position of the third block in the stack
         }
+        for i in range(self._num_blocks):
+            start_idx = 7 + (i * 7)
+            info[f'block{i+1}_init_pos'] = data.qpos[start_idx : start_idx + 3]
+        
         reward, done = jp.zeros(2)  # pylint: disable=redefined-outer-name
         obs = self._get_obs(data, info)
 
@@ -272,22 +276,29 @@ class CobotEnv(mjx_env.MjxEnv):
         
         # Velocities are usually fine as raw values (rad/s)
         qvel_arm = data.qvel[:7]
-        
-        # EE and Block positions
         ee_pos = data.site_xpos[self._ee_site_idx]
-        block_0_pos = data.qpos[7:10]
-        block_1_pos = data.qpos[14:17]
-        block_2_pos = data.qpos[21:24]
+        
+        if self._vision:
+            obs = jp.concatenate([
+                qpos_arm_smooth, # 7 dimensions
+                prev_action,
+                qvel_arm,        # 7 dimensions
+                ee_pos,          # 3 dimensions
+            ])
+        else:
+            block_positions = [
+                data.qpos[7 + (i * 7) : 7 + (i * 7) + 3] 
+                for i in range(self._num_blocks)
+            ]
 
-        obs = jp.concatenate([
-            qpos_arm_smooth, # 7 dimensions
-            prev_action,
-            qvel_arm,        # 7 dimensions
-            ee_pos,          # 3 dimensions
-            block_0_pos,     # 3 dimensions
-            block_1_pos,     # 3 dimensions
-            block_2_pos      # 3 dimensions
-        ])
+            # 2. Concatenate the arm data with the dynamic list of block positions
+            obs = jp.concatenate([
+                qpos_arm_smooth,  # 7 dims
+                prev_action,      # 7 dims
+                qvel_arm,         # 7 dims
+                ee_pos,           # 3 dims
+                *block_positions  # Unpacks the list of (3-dim) arrays into the concatenation
+            ])
         return jp.clip(obs, -10.0, 10.0)
 
     def _get_reward(
@@ -297,45 +308,69 @@ class CobotEnv(mjx_env.MjxEnv):
         info: dict[str, Any],
         metrics: dict[str, Any],
     ) -> Tuple[jax.Array, jax.Array, dict[str, Any]]:
-        pos_0 = data.qpos[7:10]
-        pos_1 = data.qpos[14:17]
-        pos_2 = data.qpos[21:24]
+        
         hand_pos = data.site_xpos[self._ee_site_idx]
-
-        pos_0_init = info['block1_init_pos']
-        pos_1_init = info['block2_init_pos']
-        pos_2_init = info['block3_init_pos']
-
-        move_0 = jp.linalg.norm(pos_0[:2] - pos_0_init[:2])
-        move_1 = jp.linalg.norm(pos_1[:2] - pos_1_init[:2])
-        move_2 = jp.linalg.norm(pos_2[:2] - pos_2_init[:2])
-        is_failure = (move_0 > 0.03) | ((move_1 > 0.03) & ((pos_1_init[2] - pos_1[2]) > 0.03))
-        # is_failure = (move_0 > 0.03) | (((pos_1_init[2] - pos_1[2]) > 0.03))
-
-        z_dropped = pos_2_init[2] - pos_2[2]
-        is_success = (z_dropped > 0.06) & (move_2 > 0.03) # Fell at least 8cm down and moved in xy axis
-
         safety_margin = 0.05 
         table_z = self.mjx_model.geom_pos[self._table_idx, 2]
         penetration = table_z + safety_margin - hand_pos[2]
         penalty_table = jp.where(penetration > 0, -10.0, 0.0)
+        penalty_action_rate = jp.linalg.norm(action * 0.1)
+        
+        if self._num_blocks == 0:
+            reward = jp.zeros(())
+            done = jp.zeros(())
+            metrics = dict(metrics)
+            metrics["reward/top_displace"] = 0.0
+            metrics["reward/table_penalty"] = penalty_table
+            metrics["reward/dist_to_block"] = 0.0
+            metrics["reward/reward_top_knockdown"] = 0.0
+            metrics["reward/reward_bottom_knockdown"] = 0.0
+            metrics["reward/reward_action_rate"] = penalty_action_rate
+            metrics["reward/reward"] = reward
+            metrics["success"] = 0.0
+            metrics["blocks_fell"] = 0.0
+            return reward, done, metrics
 
+        current_blocks_pos = jp.stack([
+            data.qpos[7 + (i * 7) : 7 + (i * 7) + 3] 
+            for i in range(self._num_blocks)
+        ])
+        initial_blocks_pos = jp.stack([
+            info[f'block{i+1}_init_pos'] 
+            for i in range(self._num_blocks)
+        ])
+
+        # Shape: (num_blocks,)
+        xy_move = jp.linalg.norm(current_blocks_pos[:, :2] - initial_blocks_pos[:, :2], axis=-1)
+        z_drop = initial_blocks_pos[:, 2] - current_blocks_pos[:, 2]
+        
+        other_xy_move = xy_move[:-1]
+        other_z_drop = z_drop[:-1]
+
+        is_failure = jp.any(other_xy_move > 0.03) | jp.any(other_z_drop > 0.03)
+
+        top_xy_move = xy_move[-1]
+        top_z_drop = z_drop[-1]
+        top_pos = current_blocks_pos[-1]
+
+        is_success = (top_z_drop > 0.06) & (top_xy_move > 0.03)
         top_reward_knockdown = jp.where(is_success, 20.0, 0.0)
         reward_bottom_knockdown = jp.where(is_failure, -10.0, 0.0)
         # top_reward_knockdown = jp.where(is_success, 80.0, 0.0)
         # reward_bottom_knockdown = jp.where(is_failure, -100.0, 0.0)
         reward_knockdown = top_reward_knockdown + reward_bottom_knockdown
 
-        # done = (is_success | is_failure).astype(jp.float32)
+        blocks_fell = (is_success | is_failure).astype(jp.float32)
         done = jp.zeros(())
-        penalty_action_rate = jp.linalg.norm(action * 0.1) * (-2.0 + (is_success | is_failure).astype(jp.float32) * -10.0)
-        dist_to_top_block = jp.linalg.norm(hand_pos - pos_2)
+
+        penalty_action_rate = penalty_action_rate * (-2.0 + blocks_fell * -10.0)
+        dist_to_top_block = jp.linalg.norm(hand_pos - top_pos)
         reward_approach = -dist_to_top_block
         
         reward = reward_knockdown + reward_approach + penalty_table + penalty_action_rate
         
         metrics = dict(metrics)
-        metrics["reward/top_displace"] = z_dropped
+        metrics["reward/top_displace"] = top_z_drop
         metrics["reward/table_penalty"] = penalty_table
         metrics["reward/dist_to_block"] = dist_to_top_block
         metrics["reward/reward_top_knockdown"] = top_reward_knockdown
@@ -343,6 +378,7 @@ class CobotEnv(mjx_env.MjxEnv):
         metrics["reward/reward_action_rate"] = penalty_action_rate
         metrics["reward/reward"] = reward
         metrics["success"] = (is_success & ~is_failure).astype(jp.float32)
+        metrics["blocks_fell"] = blocks_fell
 
         # # Add this right before the return statement
         # jax.debug.print(
