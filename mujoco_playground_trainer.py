@@ -21,6 +21,7 @@ from brax.training.agents.ppo import networks as ppo_networks
 import functools
 import copy
 from datetime import datetime
+from domain_randomization import domain_randomize_batch
 
 import wandb
 
@@ -212,8 +213,8 @@ def policy_video_callback(num_steps, make_inference_fn, params, wandb_run, num_e
 # # 3. Define the Training Function
 # Create the training configuration
 training_config = {
-    "num_timesteps": 40_000_000,
-    "num_evals": 20_000, # here
+    "num_timesteps": 100_000, # 40_000_000,
+    "num_evals": 2_000, # here
     "reward_scaling": 0.01,
     "episode_length": env_cfg.episode_length,
     "normalize_observations": True,
@@ -222,7 +223,7 @@ training_config = {
     "num_minibatches": 32,
     "num_updates_per_batch": 4,
     "discounting": 0.99,
-    "learning_rate": 3e-4,
+    "learning_rate": 6e-5,
     "entropy_cost": 5e-3,
     "num_envs": num_envs,
     "num_eval_envs": eval_num_envs,
@@ -241,10 +242,12 @@ wandb_run = wandb.init(
 wandb_progress_callback = functools.partial(progress_callback, wandb_run=wandb_run)
 wandb_policy_video_callback = functools.partial(policy_video_callback, wandb_run=wandb_run, num_envs = training_config['num_eval_envs'])
 
+
 train_fn = functools.partial(
     ppo.train,
     progress_fn = wandb_progress_callback,
     policy_params_fn = wandb_policy_video_callback,
+    save_checkpoint_path = f"/home/luisamao/villa_spaces/sim_ws/checkpoints/{wandb_run.name}",
     **training_config,
 )
 
@@ -252,7 +255,17 @@ train_fn = functools.partial(
 make_inference_fn, params, metrics = train_fn(
     environment=env,
     eval_env=eval_env,
+    # randomization_fn = domain_randomize_batch,
     wrap_env_fn=wrapper.wrap_for_brax_training, # Essential for MjxEnv
 )
+
+# save
+# from brax.io import model
+
+# os.makedirs("checkpoints", exist_ok=True)
+# model_path = f"checkpoints/{wandb_run.name}"
+# model.save_params(model_path, params)
+# print("saved params to", model_path)
+wandb.finish()
 
 # todo: domain randomization. then try with vision
