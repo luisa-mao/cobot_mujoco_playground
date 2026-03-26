@@ -23,6 +23,7 @@ from domain_randomization import dummy_domain_randomize, domain_randomize
 # 1. Load your env
 env_cfg = default_config()
 env_cfg['vision_config']['nworld'] = 64
+env_cfg['vision']= True
 print("num envs", env_cfg['vision_config']['nworld'])
 env = CobotEnv(config=env_cfg)
 
@@ -45,9 +46,12 @@ def tile(img, d):
     return np.concat(np.concat(img, axis=1), axis=1)
 
 state = jit_reset(jax.random.split(jax.random.PRNGKey(0), 64))
-image_name = "domain_randomize.png"
-media.write_image(image_name, tile(state.info['frame_stack'][:64], 8), width=512)
-print("saved to", image_name)
+basecam_image_name = "domain_randomize_basecam.png"
+media.write_image(basecam_image_name, tile(state.info['basecam_frames'][:64], 8), width=512)
+print("saved to", basecam_image_name)
+wristcam_image_name = "domain_randomize_wristcam.png"
+media.write_image(wristcam_image_name, tile(state.info['wristcam_frames'][:64], 8), width=512)
+print("saved to", wristcam_image_name)
 # # 1. Select the first 64 environments from your 64-batch state
 # # We need to slice the data and the metrics to avoid passing 64 envs to the renderer
 # indices = jnp.arange(64)

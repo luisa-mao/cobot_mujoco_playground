@@ -255,7 +255,7 @@ train_fn = functools.partial(
 make_inference_fn, params, metrics = train_fn(
     environment=env,
     eval_env=eval_env,
-    # randomization_fn = domain_randomize_batch,
+    randomization_fn = domain_randomize_batch,
     wrap_env_fn=wrapper.wrap_for_brax_training, # Essential for MjxEnv
 )
 

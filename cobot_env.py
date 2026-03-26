@@ -23,7 +23,7 @@ def default_vision_config() -> config_dict.ConfigDict:
       use_shadows=False,
       render_rgb=(True, True, True, True),
       render_depth=(True, True, True, True),
-    #   enabled_geom_groups=[0, 1, 2, 3, 4],
+      enabled_geom_groups=[0, 1, 2, 3],
       cam_active=(True, True, True, True), # [sidecam, topdown, basecam, handcam] ?
   )
 
@@ -39,7 +39,7 @@ def default_config() -> config_dict.ConfigDict:
       impl="warp",
       naconmax=20_000,
       njmax=30_000,
-      naccdmax=5000, # where to put this one
+      naccdmax=5000,
   )
 
 def prepare_cobot_model(robot_xml_path, table_xml_path, assets_dir, num_blocks=3):
@@ -136,12 +136,15 @@ class CobotEnv(mjx_env.MjxEnv):
 
 
         # vision stuff
-        vision_kwargs = self._config.vision_config.to_dict()
-        self._rc = mjx.create_render_context(
-            mjm=self._mj_model,
-            **vision_kwargs
-        )
-        self._rc_pytree = self._rc.pytree()
+        if self._vision:
+            vision_kwargs = self._config.vision_config.to_dict()
+            self._rc = mjx.create_render_context(
+                mjm=self._mj_model,
+                **vision_kwargs
+            )
+            self._rc_pytree = self._rc.pytree()
+            self._wristcam_idx = 3
+            self._basecam_idx = 2
 
     def reset(self, rng: jax.Array) -> mjx_env.State:
         qpos = jp.zeros(self.mjx_model.nq) 
@@ -155,7 +158,7 @@ class CobotEnv(mjx_env.MjxEnv):
         rng, pos_key = jax.random.split(rng)
     
         block_base_x, block_base_y = 0.8, 0.0
-        jitter = 0.0 # 0.05
+        jitter = 0.05
         xy_offset = jax.random.uniform(
             pos_key, (2,), minval=-jitter, maxval=jitter
         )
@@ -218,11 +221,17 @@ class CobotEnv(mjx_env.MjxEnv):
         obs = self._get_obs(data, info)
 
         # vision
-        # render_data = mjx.refit_bvh(self.mjx_model, data, self._rc_pytree)
-        # out = mjx.render(self.mjx_model, render_data, self._rc_pytree)
-        # rgb = mjx.get_rgb(self._rc_pytree, 2, out[0])
-        # info["frame_stack"] = rgb # frame_stack
- 
+        if self._vision:
+            obs = {"joint_states": obs}
+            render_data = mjx.refit_bvh(self.mjx_model, data, self._rc_pytree)
+            out = mjx.render(self.mjx_model, render_data, self._rc_pytree)
+            basecam_rgb = mjx.get_rgb(self._rc_pytree, self._basecam_idx, out[0])
+            wristcam_rgb = mjx.get_rgb(self._rc_pytree, self._wristcam_idx, out[0])
+            info["basecam_frames"] = basecam_rgb
+            info["wristcam_frames"] = wristcam_rgb
+            obs["pixels/basecam"] = basecam_rgb
+            obs["pixels/wristcam"] = wristcam_rgb
+    
         state = mjx_env.State(data, obs, reward, done, metrics, info)
         return state
     
@@ -232,19 +241,21 @@ class CobotEnv(mjx_env.MjxEnv):
         r, done, metrics = self._get_reward(data, action, state.info, state.metrics)
         obs = self._get_obs(data, state.info)
 
-        render_data = mjx.refit_bvh(self.mjx_model, data, self._rc_pytree)
-        out = mjx.render(self.mjx_model, render_data, self._rc_pytree)
-        rgb = mjx.get_rgb(self._rc_pytree, 0, out[0])
-        gray = jp.mean(rgb, axis=-1, keepdims=True) - 0.5
-        # prev_stack = state.info["frame_stack"]
-        # frame_stack = jp.concatenate([prev_stack[..., 1:], gray], axis=-1)
-        # info = dict(state.info)
-        # info["frame_stack"] = frame_stack
-        # info["time_out"] = done
-        # obs = {"pixels/view_0": frame_stack}
         info = dict(state.info)
         info['prev_ctrl'] = ctrl
         info['prev_action'] = action
+
+        if self._vision:
+            obs = {"joint_states": obs}
+            render_data = mjx.refit_bvh(self.mjx_model, data, self._rc_pytree)
+            out = mjx.render(self.mjx_model, render_data, self._rc_pytree)
+            basecam_rgb = mjx.get_rgb(self._rc_pytree, self._basecam_idx, out[0])
+            wristcam_rgb = mjx.get_rgb(self._rc_pytree, self._wristcam_idx, out[0])
+            info["basecam_frames"] = basecam_rgb
+            info["wristcam_frames"] = wristcam_rgb
+            obs["pixels/basecam"] = basecam_rgb
+            obs["pixels/wristcam"] = wristcam_rgb
+
         # return mjx_env.State(data, obs, r, done, metrics, info)
         return state.replace(
             data=data, 

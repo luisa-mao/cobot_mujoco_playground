@@ -13,7 +13,7 @@ def dummy_domain_randomize(sys):
 def domain_randomize(mjx_model: mjx.Model, num_worlds: int) -> Tuple[mjx.Model, mjx.Model]:
     mj_model = CobotEnv().mj_model
     table_geom_idx  = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_GEOM, 'table_top')
-    rng = rng = jax.random.PRNGKey(0)
+    rng = jax.random.PRNGKey(0)
     @jax.vmap
     def rand(rng):
         # Randomize Table Height
@@ -46,7 +46,7 @@ def domain_randomize(mjx_model: mjx.Model, num_worlds: int) -> Tuple[mjx.Model, 
 def domain_randomize_batch(mjx_model: mjx.Model, rng) -> Tuple[mjx.Model, mjx.Model]: # expects batch of rng
     mj_model = CobotEnv().mj_model
     table_geom_idx  = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_GEOM, 'table_top')
-    rng = rng = jax.random.PRNGKey(0)
+    # rng = rng = jax.random.PRNGKey(0)
     @jax.vmap
     def rand(rng):
         # Randomize Table Height
@@ -61,7 +61,7 @@ def domain_randomize_batch(mjx_model: mjx.Model, rng) -> Tuple[mjx.Model, mjx.Mo
         return new_geom_pos, new_friction
 
     # batch_geom_pos, batch_friction = rand(jax.random.split(rng, num_worlds))
-    batch_geom_pos, batch_friction = rand(jax.random.split(rng))
+    batch_geom_pos, batch_friction = rand(rng)
     in_axes = jax.tree_util.tree_map(lambda x: None, mjx_model)
     in_axes = in_axes.tree_replace({
         'geom_pos': 0,
