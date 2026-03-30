@@ -51,9 +51,21 @@
 
       <body name="base_link" pos="0 .025 0.469">
         <geom class="visual" mesh="base_link" />
-                <camera name="basecam" pos="0.1 -0.38 0.52" quat="0.62735 0.43968 -0.36908 -0.52662" /> 
+          <!-- <camera name="basecam_hand_tuned" pos="0.1 -0.38 0.52" quat="0.62735 0.43968 -0.36908 -0.52662" />  -->
                 <!--the above is 70 degree rotation x, -80 degree rotation z in world frame-->
-        <site name="basecam_site" type="box" pos="0.1 -0.38 0.52" quat="0.574 0 0.819 0" size="0.02 0.03 0.04" rgba="0 0 1 1" group="1" />
+          <!-- <camera name="basecam_ros_convention" pos="0.0158 -0.2815 0.5664" quat="0.5100 -0.6224 0.5100 -0.3038" />  -->
+          <camera name="basecam"
+            pos="0.0158 -0.2815 0.5664"
+            quat="0.6224 0.51 -0.3038 -0.51"
+            mode="fixed"
+            resolution="1280 720"
+            sensorsize="1280 720" 
+            focalpixel="612.29 612.05"
+            principalpixel="0.14 -4.72"
+          /> 
+          <!-- the above comes from base cam extrinsics from the robot, rotated pi rad around x axis
+          to go from ros convention (x right, z forward, y down) to mujoco convention (x right, -z forward, y up) -->
+        <site name="basecam_site" type="box" pos="0.0158 -0.2815 0.5664" quat="0.6224 0.51 -0.3038 -0.51" size="0.02 0.03 0.04" rgba="0 0 1 1" group="1" />
 
         <body name="shoulder_link" pos="0 0 0.15643" quat="0 1 0 0">
           <joint name="joint_1" />
@@ -92,7 +104,15 @@
                         condim="4" 
                         />
                       <site name="pinch_site" pos="0 0 -0.15" quat="0 1 0 0" group="3" />
-                      <camera name="handcam" pos="0.0 -0.06 -0.07" quat="0 0 0 1" />
+                      <camera name="handcam"
+                        pos="0.0 -0.06 -0.07"
+                        quat="0 0 0 1" 
+                        mode="fixed"
+                        resolution="1280 720"
+                        sensorsize="1280 720"
+                        focalpixel="1297.67 1298.63"
+                        principalpixel="-19.09 121.72"
+                      />
                       <site name="handcam_site" pos="0.0 -0.06 -0.07" quat="0 0 0 1" size="0.02" rgba="0 0 1 1" group="1" />
                     </body>
                   </body>
