@@ -44,11 +44,17 @@ def progress_callback(num_steps, metrics, wandb_run):
     top_knockdown = metrics.get('eval/episode_reward/reward_top_knockdown', 0.0)
     bot_knockdown = metrics.get('eval/episode_reward/reward_bottom_knockdown', 0.0)
     top_displace  = metrics.get('eval/episode_reward/top_displace', 0.0)
+    xy_displace   = metrics.get('eval/episode_reward/xy_displace', 0.0)
     table_penalty = metrics.get('eval/episode_reward/table_penalty', 0.0)
-    dist_to_block = metrics.get('eval/episode_reward/dist_to_block', 0.0)
+    reward_approach = metrics.get('eval/episode_reward/reward_approach', 0.0)
     action_rate   = metrics.get('eval/episode_reward/reward_action_rate', 0.0)
+    action_direction   = metrics.get('eval/episode_reward/reward_action_direction', 0.0)
     success       = metrics.get('eval/episode_success', 0.0)
-    print(f"[{now}] Steps: {num_steps:>10} | Reward: {reward:>10.2f} | Loss: {loss:>10.4f} | SPS: {sps:>8.0f} | Top KD: {top_knockdown:>6.2f} | Bot KD: {bot_knockdown:>6.2f} | Displace: {top_displace:>6.3f} | Table Penalty: {table_penalty:>6.3f} | Dist to Block: {dist_to_block:>6.3f} | Action rate: {action_rate:>6.3f} | Success: {success:>6.3f}")
+    success_rate       = metrics.get('eval/episode_success_rate', 0.0)
+    print(f"[{now}] Steps: {num_steps:>10} | Reward: {reward:>10.2f} | Loss: {loss:>10.4f} | SPS: {sps:>8.0f} | Top KD: {top_knockdown:>6.2f} | Bot KD: {bot_knockdown:>6.2f} | Displace: {top_displace:>6.3f} | \
+          XY Displace: {xy_displace:>6.3f} | Table Penalty: {table_penalty:>6.3f} | Reward Approach: {reward_approach:>6.3f} | \
+             Action direction: {action_direction:>6.3f} | Action rate: {action_rate:>6.3f} | \
+            Success: {success:>6.3f} | Success Rate: {success_rate:>6.3f} | ")
 
     wandb_run.log({
         'eval/episode_reward': reward,
@@ -57,10 +63,13 @@ def progress_callback(num_steps, metrics, wandb_run):
         'eval/episode_reward_top_knockdown': top_knockdown,
         'eval/episode_reward_bottom_knockdown': bot_knockdown,
         'eval/episode_top_displace': top_displace,
+        'eval/episode_xy_displace': xy_displace,
         'eval/episode_table_penalty': table_penalty,
-        'eval/episode_dist_to_block': dist_to_block,
+        'eval/episode_reward_approach': reward_approach,
         'eval/episode_reward_action_rate': action_rate,
+        'eval/episode_reward_action_direction': action_direction,
         'eval/episode_success': success,
+        'eval/episode_success_rate': success_rate,
     })
 
 
@@ -148,6 +157,8 @@ def policy_video_callback(num_steps, make_inference_fn, params, wandb_run, infer
         render_done_idx = is_done_at // render_every
         for f_idx in range(render_done_idx, len(frames)):
             # Draw the square only from the moment the task was 'done'
+            is_success = success_signal[f_idx] > 0.5
+            marker_color = [0, 255, 0] if is_success else [255, 0, 0]
             frames[f_idx][10:60, 10:60, :] = marker_color
 
     video_path = f"videos/{wandb_run.name}"

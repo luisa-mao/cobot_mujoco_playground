@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 import os
 
 ASSETS_DIR = "/home/luisamao/villa_spaces/sim_ws/src/mujoco_cobot/assets"
-ROBOT_XML = "/home/luisamao/villa_spaces/sim_ws/robot_simple_collision.xml"
+ROBOT_XML = "/home/luisamao/villa_spaces/sim_ws/robot_simple_collision_ee.xml"
 TABLE_XML = "/home/luisamao/villa_spaces/sim_ws/table.xml"
 
 
@@ -30,7 +30,7 @@ def default_vision_config() -> config_dict.ConfigDict:
 
 def default_config() -> config_dict.ConfigDict:
   return config_dict.create(
-      ctrl_dt=0.02,
+      ctrl_dt=0.02, 
       sim_dt=0.0005,
       episode_length=250,
       action_repeat=1,
@@ -41,6 +41,7 @@ def default_config() -> config_dict.ConfigDict:
       njmax=30_000,
       naccdmax=5000,
       num_blocks = 3,
+      num_joints = 9,
   )
 
 def prepare_cobot_model(robot_xml_path, table_xml_path, assets_dir, num_blocks=3):
@@ -117,6 +118,9 @@ class CobotEnv(mjx_env.MjxEnv):
         self._num_blocks: int = self._config.num_blocks
         self._xml_string = prepare_cobot_model(ROBOT_XML, TABLE_XML, ASSETS_DIR, num_blocks = self._num_blocks)
         self._mj_model = mujoco.MjModel.from_xml_string(self._xml_string)
+        self._num_joints: int = self._config.num_joints
+        self._action_scale = 0.1
+        self._episode_length: int = self._config.episode_length
         # print(f"\nModel loaded successfully!")
         # mj_model = self._mj_model
         # print(f"  - DOFs: {mj_model.nv}")
@@ -134,7 +138,16 @@ class CobotEnv(mjx_env.MjxEnv):
         self._ee_site_idx = mujoco.mj_name2id(
             self._mj_model, mujoco.mjtObj.mjOBJ_SITE, 'pinch_site'
         )
+        self._gripper_max_width = 0.04
 
+
+        for i in range(self._mj_model.njnt):
+            name = mujoco.mj_id2name(self._mj_model, mujoco.mjtObj.mjOBJ_JOINT, i)
+            start_idx = self._mj_model.jnt_qposadr[i]
+            # Check joint type to know the width (Free=7, Ball=4, Hinge/Slide=1)
+            jnt_type = self._mj_model.jnt_type[i]
+            width = {0: 7, 1: 4, 2: 1, 3: 1}[jnt_type] 
+            print(f"Joint {i} [{name}]: qpos indices {start_idx} to {start_idx + width}")
 
         # vision stuff
         if self._vision:
@@ -151,21 +164,22 @@ class CobotEnv(mjx_env.MjxEnv):
         qpos = jp.zeros(self.mjx_model.nq) 
         qvel = jp.zeros(self.mjx_model.nv) 
 
+        # jax.debug.print("Resetting environment with {num_blocks} blocks, {num_joints} joints, {qpos} qpos.", num_blocks=self._num_blocks, num_joints=self._num_joints, qpos=qpos.shape)
+
         # table and blocks
         table_surface_z = self.mjx_model.geom_pos[self._table_idx, 2]
         block_half_height = 0.03
-        # num_blocks = (self.mjx_model.nq - 7) // 7  # Calculate N based on qpos size
         rng, pos_key = jax.random.split(rng)
     
-        block_base_x, block_base_y = 0.8, 0.0
-        jitter = 0.05
+        block_base_x, block_base_y = 0.6, -0.1
+        jitter = 0.01
         xy_offset = jax.random.uniform(
             pos_key, (2,), minval=-jitter, maxval=jitter
         )
         block_curr_x = block_base_x + xy_offset[0]
         block_curr_y = block_base_y + xy_offset[1]
         for i in range(self._num_blocks):
-            start_idx = 7 + (i * 7)
+            start_idx = self._num_joints + (i * 7)
             z_pos = table_surface_z + (block_half_height * 2 * i) + block_half_height + 0.04 + (i * 0.01)
             block_state = jp.array([block_curr_x, block_curr_y, z_pos, 1.0, 0.0, 0.0, 0.0])
             qpos = qpos.at[start_idx : start_idx + 7].set(block_state)
@@ -179,7 +193,7 @@ class CobotEnv(mjx_env.MjxEnv):
             njmax=self._config.njmax,
             naccdmax=self._config.naccdmax,
         )
-        new_geom_xpos = data.geom_xpos.at[18, 2].set(table_surface_z)
+        new_geom_xpos = data.geom_xpos.at[self._table_idx, 2].set(table_surface_z)
         data = data.replace(geom_xpos=new_geom_xpos)
         data = mjx.forward(self.mjx_model, data)
 
@@ -191,34 +205,47 @@ class CobotEnv(mjx_env.MjxEnv):
 
         # set robot after settling
         # robot
-        robot_home = jp.array([0.2, 1.019, 0.144, .6, -0.221, 0.7, -0.886])
-        new_qpos = data.qpos.at[:7].set(robot_home)
-        new_qvel = data.qvel.at[:7].set(jp.zeros(7))
+        # robot_home = jp.array([0.2, 1.019, 0.144, .6, -0.221, 0.7, -0.886, 0.04])
+        # robot_home = jp.array([0, 0, 0, 0, 0, 0, 0, 0, 0])
+        robot_home = jp.array([
+                -2.76968753372131e-05,
+                0.2623287909343436,
+                -3.1403614742178494,
+                -2.269397010260591,
+                -0.0003360909295677672,
+                0.9596066489970824,
+                1.5707649014940337,
+                0, 0
+            ]            
+        )
+        new_qpos = data.qpos.at[:self._num_joints].set(robot_home)
+        new_qvel = data.qvel.at[:self._num_joints].set(jp.zeros(self._num_joints))
         data = data.replace(qpos=new_qpos, qvel=new_qvel)
         data = mjx.forward(self.mjx_model, data)
         # todo: randomize block poses
 
         metrics = {
+            'reward/xy_displace': jp.zeros(()),
             'reward/top_displace': jp.zeros(()),
             'reward/table_penalty': jp.zeros(()),
-            'reward/dist_to_block': jp.zeros(()),
+            'reward/reward_approach': jp.zeros(()),
             'reward/reward_top_knockdown': jp.zeros(()),
             'reward/reward_bottom_knockdown': jp.zeros(()),
             'reward/reward': jp.zeros(()),
             'success': jp.zeros(()),
+            'success_rate': jp.zeros(()),
             'reward/reward_action_rate': jp.zeros(()),
+            'reward/reward_action_direction': jp.zeros(()),
             'blocks_fell': jp.zeros(())
         }
 
         info = {
-            'prev_ctrl': jp.zeros(7),
-            'prev_action': jp.zeros(7),
-            # 'block1_init_pos': data.qpos[7:10],  # Position of the first block in the stack
-            # 'block2_init_pos': data.qpos[14:17],  # Position of the second block in the stack
-            # 'block3_init_pos': data.qpos[21:24],  # Position of the third block in the stack
+            'prev_ctrl': jp.zeros(self._num_joints - 1),
+            'prev_action': jp.zeros(self._num_joints - 1),
+            'step': jp.zeros(()),
         }
         for i in range(self._num_blocks):
-            start_idx = 7 + (i * 7)
+            start_idx = self._num_joints + (i * 7)
             info[f'block{i+1}_init_pos'] = data.qpos[start_idx : start_idx + 3]
         
         reward, done = jp.zeros(2)  # pylint: disable=redefined-outer-name
@@ -248,6 +275,7 @@ class CobotEnv(mjx_env.MjxEnv):
         info = dict(state.info)
         info['prev_ctrl'] = ctrl
         info['prev_action'] = action
+        info['step'] = info.get('step', jp.zeros(())) + 1
 
         if self._vision:
             obs = {"joint_states": obs}
@@ -266,37 +294,39 @@ class CobotEnv(mjx_env.MjxEnv):
             obs=obs, 
             reward=r,      # Note: The field name in State is 'reward', not 'r'
             done=done, 
-            metrics=metrics
+            metrics=metrics,
+            info=info
         )
 
 
     def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> jax.Array:
-        qpos_arm_smooth = data.qpos[:7]
+        qpos_raw = data.qpos[:self._num_joints]
+        qpos_arm_normalized = (qpos_raw + jp.pi) % (2 * jp.pi) - jp.pi
         prev_action = info['prev_action']
         
         # Velocities are usually fine as raw values (rad/s)
-        qvel_arm = data.qvel[:7]
+        qvel_arm = data.qvel[:self._num_joints]
         ee_pos = data.site_xpos[self._ee_site_idx]
         
         if self._vision:
             obs = jp.concatenate([
-                qpos_arm_smooth, # 7 dimensions
+                qpos_arm_normalized, # self._num_joints dimensions
                 prev_action,
-                qvel_arm,        # 7 dimensions
-                ee_pos,          # 3 dimensions
+                qvel_arm,        # self._num_joints dimensions
+                # ee_pos,          # 3 dimensions
             ])
         else:
             block_positions = [
-                data.qpos[7 + (i * 7) : 7 + (i * 7) + 3] 
+                data.qpos[self._num_joints + (i * 7) : self._num_joints + (i * 7) + 3] 
                 for i in range(self._num_blocks)
             ]
 
             # 2. Concatenate the arm data with the dynamic list of block positions
             obs = jp.concatenate([
-                qpos_arm_smooth,  # 7 dims
-                prev_action,      # 7 dims
-                qvel_arm,         # 7 dims
-                ee_pos,           # 3 dims
+                qpos_arm_normalized,  # self._num_joints dims
+                prev_action,      # self._num_joints dims
+                qvel_arm,         # self._num_joints dims
+                # ee_pos,           # 3 dims
                 *block_positions  # Unpacks the list of (3-dim) arrays into the concatenation
             ])
         return jp.clip(obs, -10.0, 10.0)
@@ -314,25 +344,29 @@ class CobotEnv(mjx_env.MjxEnv):
         table_z = self.mjx_model.geom_pos[self._table_idx, 2]
         penetration = table_z + safety_margin - hand_pos[2]
         penalty_table = jp.where(penetration > 0, -10.0, 0.0)
-        penalty_action_rate = jp.linalg.norm(action * 0.1)
+        penalty_action_rate = jp.linalg.norm(action * self._action_scale)
+        penalty_action_direction = jp.linalg.norm((action - info.get('prev_action', jp.zeros_like(action))) * self._action_scale) * -1.0
         
-        if self._num_blocks == 0:
+        if self._num_blocks == 0: # penalty action rate should be negative here...
             reward = jp.zeros(())
             done = jp.zeros(())
             metrics = dict(metrics)
+            metrics["reward/xy_displace"] = 0.0
             metrics["reward/top_displace"] = 0.0
             metrics["reward/table_penalty"] = penalty_table
-            metrics["reward/dist_to_block"] = 0.0
+            metrics["reward/reward_approach"] = 0.0
             metrics["reward/reward_top_knockdown"] = 0.0
             metrics["reward/reward_bottom_knockdown"] = 0.0
             metrics["reward/reward_action_rate"] = penalty_action_rate
+            metrics["reward/reward_action_direction"] = penalty_action_direction
             metrics["reward/reward"] = reward
             metrics["success"] = 0.0
+            metrics["success_rate"] = 0.0
             metrics["blocks_fell"] = 0.0
             return reward, done, metrics
 
         current_blocks_pos = jp.stack([
-            data.qpos[7 + (i * 7) : 7 + (i * 7) + 3] 
+            data.qpos[self._num_joints + (i * 7) : self._num_joints + (i * 7) + 3] 
             for i in range(self._num_blocks)
         ])
         initial_blocks_pos = jp.stack([
@@ -354,7 +388,7 @@ class CobotEnv(mjx_env.MjxEnv):
         top_pos = current_blocks_pos[-1]
 
         is_success = (top_z_drop > 0.06) & (top_xy_move > 0.03)
-        top_reward_knockdown = jp.where(is_success, 20.0, 0.0)
+        top_reward_knockdown = jp.where(is_success, 10.0, 0.0)
         reward_bottom_knockdown = jp.where(is_failure, -10.0, 0.0)
         # top_reward_knockdown = jp.where(is_success, 80.0, 0.0)
         # reward_bottom_knockdown = jp.where(is_failure, -100.0, 0.0)
@@ -363,21 +397,24 @@ class CobotEnv(mjx_env.MjxEnv):
         blocks_fell = (is_success | is_failure).astype(jp.float32)
         done = jp.zeros(())
 
-        penalty_action_rate = penalty_action_rate * (-2.0 + blocks_fell * -10.0)
+        penalty_action_rate = penalty_action_rate * (-1.0 + blocks_fell * -10.0)
         dist_to_top_block = jp.linalg.norm(hand_pos - top_pos)
-        reward_approach = -dist_to_top_block
+        reward_approach = -dist_to_top_block * blocks_fell
         
-        reward = reward_knockdown + reward_approach + penalty_table + penalty_action_rate
+        reward = reward_knockdown + reward_approach + penalty_table + penalty_action_rate + penalty_action_direction + abs(top_xy_move) * 10.0
         
         metrics = dict(metrics)
+        metrics["reward/xy_displace"] = abs(top_xy_move)
         metrics["reward/top_displace"] = top_z_drop
         metrics["reward/table_penalty"] = penalty_table
-        metrics["reward/dist_to_block"] = dist_to_top_block
+        metrics["reward/reward_approach"] = reward_approach
         metrics["reward/reward_top_knockdown"] = top_reward_knockdown
         metrics["reward/reward_bottom_knockdown"] = reward_bottom_knockdown
         metrics["reward/reward_action_rate"] = penalty_action_rate
+        metrics["reward/reward_action_direction"] = penalty_action_direction
         metrics["reward/reward"] = reward
         metrics["success"] = (is_success & ~is_failure).astype(jp.float32)
+        metrics["success_rate"] = (is_success & ~is_failure & (info.get('step', jp.zeros(())) >= self._episode_length - 1)).astype(jp.float32)
         metrics["blocks_fell"] = blocks_fell
 
         # # Add this right before the return statement
@@ -399,12 +436,15 @@ class CobotEnv(mjx_env.MjxEnv):
         return reward, done, metrics
 
     def _get_ctrl(self, data: mjx.Data, action: jax.Array) -> jax.Array:
-        ctrl_delta = action * 0.1
-        joint_state = data.qpos[:7]
+        ctrl_delta = jp.concat([action[:-1] * self._action_scale, action[-1:] * self._gripper_max_width])
+        joint_state = data.qpos[:self._num_joints - 1]
         ctrl = joint_state + ctrl_delta
 
-        wrapped_ctrl = (ctrl + jp.pi) % (2 * jp.pi) - jp.pi
-    
+        arm_ctrl = ctrl[:7]
+        gripper_ctrl = ctrl[7:8] # Using slice [7:8] keeps it as an array of size 1
+        arm_wrapped = (arm_ctrl + jp.pi) % (2 * jp.pi) - jp.pi
+        full_ctrl = jp.concatenate([arm_wrapped, gripper_ctrl])
+
         # Apply Hard Physical Limits to the Bounded Joints (1, 3, 5)
         # We define the limits for those specific indices
         low_lim = jp.array([-2.24, -2.57, -2.09])
@@ -412,8 +452,8 @@ class CobotEnv(mjx_env.MjxEnv):
         lim_idx = jp.array([1, 3, 5])
         
         # Clip only the limited joints to ensure they stay within MuJoCo's bounds
-        final_ctrl = wrapped_ctrl.at[lim_idx].set(
-            jp.clip(wrapped_ctrl[lim_idx], low_lim, high_lim)
+        final_ctrl = full_ctrl.at[lim_idx].set(
+            jp.clip(full_ctrl[lim_idx], low_lim, high_lim)
         )
         return final_ctrl
     @property

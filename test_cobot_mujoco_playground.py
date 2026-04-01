@@ -20,6 +20,47 @@ import jax
 import jax.numpy as jnp
 import mediapy as media
 
+import jax
+import jax.numpy as jnp
+from brax.training.acme import running_statistics
+from brax.training.agents.ppo import networks as ppo_networks
+from brax.training.agents.ppo import checkpoint
+
+def load_inference_without_env(model_path, obs_dim=30, action_dim=7):
+    """
+    Loads a pretrained Brax model using only known dimensions.
+    """
+    # 1. Manually create the observation 'blueprint'
+    # This replaces env.reset(key).obs
+    # obs_shape = jax.ShapeDtypeStruct(shape=(obs_dim,), dtype=jnp.dtype('float32'))
+
+    # 2. Create the Networks
+    # The factory needs the shape to build the internal MLP layers
+    ppo_network = ppo_networks.make_ppo_networks(
+        obs_dim, 
+        action_dim, 
+        preprocess_observations_fn=running_statistics.normalize
+    )
+
+    # 3. Make Inference Function (The "Shell")
+    # This creates the logic wrapper for the policy
+    make_policy = ppo_networks.make_inference_fn(ppo_network)
+
+    # 4. Restore from Checkpoint
+    # This pulls (normalizer_params, policy_params, value_params)
+    params = checkpoint.load(model_path)
+    
+    # params[0]: Running mean/std (normalizer)
+    # params[1]: Policy weights
+    # params[2]: Value weights
+    inference_params = (params[0], params[1], params[2])
+
+    # 5. Create the JIT function
+    raw_inference_fn = make_policy(inference_params)
+    jit_inference_fn = jax.jit(raw_inference_fn)
+
+    return jit_inference_fn
+
 def move_joint(env, num_envs=4, max_steps=500):
     # 1. Setup Manually Vectorized JIT functions
     # This replaces what the Brax wrapper was doing under the hood
@@ -46,11 +87,12 @@ def move_joint(env, num_envs=4, max_steps=500):
     # 2. Define the physics loop
     def step_fn(carry, i):
         state, og_pose = carry
-        
-        # Define action (7 actuators)
-        single_action = jnp.zeros(7)
-        single_action = single_action.at[0].set(1.0) 
-        batched_action = jnp.broadcast_to(single_action, (num_envs, 7))
+        num_joints = 8
+        # Define action (num_joints actuators)
+        single_action = jnp.zeros(num_joints)
+        # single_action = single_action.at[0].set(1.0) 
+        single_action = single_action.at[7].set(1.0) 
+        batched_action = jnp.broadcast_to(single_action, (num_envs, num_joints))
         
         # Step the environment - NO AUTO RESET HAPPENS HERE
         next_state = jit_step(state, batched_action)
@@ -66,6 +108,14 @@ def move_joint(env, num_envs=4, max_steps=500):
             done=next_state.done[0], # You will see this stay 1.0 once it hits
             dist=m['reward/dist_to_block'][0],
             top_d=m['reward/top_displace'][0]
+        )
+        jax.debug.print(
+            "--- STEP {step} ---\n"
+            "Robot QPos: {robot_q}\n",
+            # "Block 1 QPos: {b1_q}\n",
+            step=i,
+            robot_q=next_state.data.qpos[0, num_joints-2:num_joints],      # Arm + Gripper
+            # b1_q=next_state.data.qpos[0, num_joints:num_joints+7] # First Block
         )
 
         # Build trajectory data
@@ -96,8 +146,12 @@ def move_joint(env, num_envs=4, max_steps=500):
 
     # 5. Render
     fps = 1.0 / env.dt
+    frames = env.render(rollout_list, camera="topdown")
+    media.write_video("topdown_vis.mp4", frames, fps=fps)
     frames = env.render(rollout_list, camera="sideview")
-    media.write_video("no_reset_test.mp4", frames, fps=fps)
+    media.write_video("sideview_vis.mp4", frames, fps=fps)
+    frames = env.render(rollout_list, camera="sideview_y")
+    media.write_video("sideview_y_vis.mp4", frames, fps=fps)
 
 from brax.io import model
 from brax.training.agents.ppo import train as ppo
@@ -130,10 +184,11 @@ def examine_policy(env, num_envs=4, max_steps=500, restore_checkpoint_path=''):
         ppo.train,
         **training_config,
     )
-    make_inference_fn, params, metrics = train_fn(environment=env, num_timesteps=0, wrap_env_fn=wrapper.wrap_for_brax_training) # dummy train to get the make_inference_fn
-    inference_fn = make_inference_fn(params)
-    inference_fn = jax.jit(make_inference_fn(params))
-    jit_inference_fn = jax.jit(inference_fn)
+    # make_inference_fn, params, metrics = train_fn(environment=env, num_timesteps=0, wrap_env_fn=wrapper.wrap_for_brax_training) # dummy train to get the make_inference_fn
+    # inference_fn = make_inference_fn(params)
+    # inference_fn = jax.jit(make_inference_fn(params))
+    # jit_inference_fn = jax.jit(inference_fn)
+    jit_inference_fn = load_inference_without_env(restore_checkpoint_path, obs_dim=env.observation_size, action_dim=env.action_size)
 
     # 1. Setup Manually Vectorized JIT functions
     # This replaces what the Brax wrapper was doing under the hood
@@ -165,12 +220,14 @@ def examine_policy(env, num_envs=4, max_steps=500, restore_checkpoint_path=''):
         state_keys = list(vars(state).keys())
         jax.debug.print("state attributes {z}", z=state_keys)
         jax.debug.print("obs shape {z}", z = state.obs.shape)
+        jax.debug.print("obs {z}", z = state.obs[0])
         jax.debug.print("data shape {z}", z = state.data.shape)
         # obs shape (Array(4, dtype=int32), Array(33, dtype=int32))
         # state attributes ['data', 'obs', 'reward', 'done', 'metrics', 'info']
         # data shape (Array(4, dtype=int32), Array(15, dtype=int32), Array(6, dtype=int32))
         ctrl, _ = jit_inference_fn(state.obs, act_rng)        
         next_state = jit_step(state, ctrl)
+        jax.debug.print("control {z}", z = ctrl[0])
         
         # Debugging prints for Env 0
         m = next_state.metrics
@@ -220,12 +277,12 @@ def examine_policy(env, num_envs=4, max_steps=500, restore_checkpoint_path=''):
 # --- EXECUTION ---
 infer_env_cfg = default_config()
 infer_env_cfg.vision_config.nworld = 4
-infer_env_cfg.num_blocks = 0
+infer_env_cfg.num_blocks = 3
 
 # Use the RAW environment class
 # This bypasses the Brax AutoResetWrapper entirely
 infer_env = CobotEnv(config=infer_env_cfg)
 
-# move_joint(infer_env, num_envs=4, max_steps=100)
-restore_checkpoint_path = "/home/luisamao/villa_spaces/sim_ws/checkpoints/distinctive-frog-71/000043089920"
-examine_policy(infer_env, num_envs=4, max_steps=100, restore_checkpoint_path=restore_checkpoint_path)
+move_joint(infer_env, num_envs=4, max_steps=100)
+# restore_checkpoint_path = "/home/luisamao/villa_spaces/sim_ws/checkpoints/dry-tree-91/000043089920"
+# examine_policy(infer_env, num_envs=4, max_steps=100, restore_checkpoint_path=restore_checkpoint_path)
