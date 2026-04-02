@@ -18,7 +18,8 @@ def domain_randomize(mjx_model: mjx.Model, num_worlds: int) -> Tuple[mjx.Model, 
     def rand(rng):
         # Randomize Table Height
         key1, key2 = jax.random.split(rng)
-        new_z = jax.random.uniform(key1, (), minval=0.6, maxval=0.7)
+        # new_z = jax.random.uniform(key1, (), minval=0.6, maxval=0.7)
+        new_z = jax.random.uniform(key1, (), minval=0.75, maxval=0.85)
         new_geom_pos = mjx_model.geom_pos.at[table_geom_idx, 2].set(new_z)
         
         # Randomize Friction

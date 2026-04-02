@@ -22,44 +22,7 @@ import mediapy as media
 
 import jax
 import jax.numpy as jnp
-from brax.training.acme import running_statistics
-from brax.training.agents.ppo import networks as ppo_networks
-from brax.training.agents.ppo import checkpoint
-
-def load_inference_without_env(model_path, obs_dim=30, action_dim=7):
-    """
-    Loads a pretrained Brax model using only known dimensions.
-    """
-    # 1. Manually create the observation 'blueprint'
-    # This replaces env.reset(key).obs
-    # obs_shape = jax.ShapeDtypeStruct(shape=(obs_dim,), dtype=jnp.dtype('float32'))
-
-    # 2. Create the Networks
-    # The factory needs the shape to build the internal MLP layers
-    ppo_network = ppo_networks.make_ppo_networks(
-        obs_dim, 
-        action_dim, 
-        preprocess_observations_fn=running_statistics.normalize
-    )
-
-    # 3. Make Inference Function (The "Shell")
-    # This creates the logic wrapper for the policy
-    make_policy = ppo_networks.make_inference_fn(ppo_network)
-
-    # 4. Restore from Checkpoint
-    # This pulls (normalizer_params, policy_params, value_params)
-    params = checkpoint.load(model_path)
-    
-    # params[0]: Running mean/std (normalizer)
-    # params[1]: Policy weights
-    # params[2]: Value weights
-    inference_params = (params[0], params[1], params[2])
-
-    # 5. Create the JIT function
-    raw_inference_fn = make_policy(inference_params)
-    jit_inference_fn = jax.jit(raw_inference_fn)
-
-    return jit_inference_fn
+from utils import load_inference_without_env
 
 def move_joint(env, num_envs=4, max_steps=500):
     # 1. Setup Manually Vectorized JIT functions
@@ -106,7 +69,7 @@ def move_joint(env, num_envs=4, max_steps=500):
             step=i,
             rw=next_state.reward[0],
             done=next_state.done[0], # You will see this stay 1.0 once it hits
-            dist=m['reward/dist_to_block'][0],
+            dist=m['reward/xy_displace'][0],
             top_d=m['reward/top_displace'][0]
         )
         jax.debug.print(
@@ -150,8 +113,8 @@ def move_joint(env, num_envs=4, max_steps=500):
     media.write_video("topdown_vis.mp4", frames, fps=fps)
     frames = env.render(rollout_list, camera="sideview")
     media.write_video("sideview_vis.mp4", frames, fps=fps)
-    frames = env.render(rollout_list, camera="sideview_y")
-    media.write_video("sideview_y_vis.mp4", frames, fps=fps)
+    # frames = env.render(rollout_list, camera="sideview_y")
+    # media.write_video("sideview_y_vis.mp4", frames, fps=fps)
 
 from brax.io import model
 from brax.training.agents.ppo import train as ppo
@@ -159,31 +122,6 @@ import functools
 from brax.training.agents.ppo import networks as ppo_networks
 
 def examine_policy(env, num_envs=4, max_steps=500, restore_checkpoint_path=''):
-    training_config = {
-        "num_timesteps": 0, # 100_000, # 40_000_000,
-        "num_evals": 1, # 2_000, # here
-        "reward_scaling": 0.01,
-        "episode_length": 250,
-        "normalize_observations": True,
-        "action_repeat": 1,
-        "unroll_length": 10,
-        "num_minibatches": 32,
-        "num_updates_per_batch": 4,
-        "discounting": 0.99,
-        "learning_rate": 3e-4,
-        "entropy_cost": 5e-3,
-        "num_envs": num_envs,
-        "batch_size": 512,
-        "network_factory": ppo_networks.make_ppo_networks,
-        "seed": 42,
-        "max_devices_per_host": 1,
-        "clipping_epsilon": 0.2,
-        "restore_checkpoint_path": restore_checkpoint_path,
-    }
-    train_fn = functools.partial(
-        ppo.train,
-        **training_config,
-    )
     # make_inference_fn, params, metrics = train_fn(environment=env, num_timesteps=0, wrap_env_fn=wrapper.wrap_for_brax_training) # dummy train to get the make_inference_fn
     # inference_fn = make_inference_fn(params)
     # inference_fn = jax.jit(make_inference_fn(params))
@@ -237,8 +175,8 @@ def examine_policy(env, num_envs=4, max_steps=500, restore_checkpoint_path=''):
             "Dist/Block:    {dist:.4f} | Top Displace: {top_d:.4f}\n",
             step=i,
             rw=next_state.reward[0],
-            done=next_state.done[0], # You will see this stay 1.0 once it hits
-            dist=m['reward/dist_to_block'][0],
+            done=next_state.metrics['blocks_fell'], # You will see this stay 1.0 once it hits
+            dist=m['reward/xy_displace'][0],
             top_d=m['reward/top_displace'][0]
         )
 
@@ -252,6 +190,11 @@ def examine_policy(env, num_envs=4, max_steps=500, restore_checkpoint_path=''):
             "data.mocap_quat": next_state.data.mocap_quat,
             "data.xfrc_applied": next_state.data.xfrc_applied,
         })
+
+        traj_data = traj_data.replace(
+            metrics={'success': state.metrics['success'], 'blocks_fell': state.metrics['blocks_fell']},
+            done=state.done
+        )
         
         return (next_state, rng), traj_data
 
@@ -267,10 +210,41 @@ def examine_policy(env, num_envs=4, max_steps=500, restore_checkpoint_path=''):
         jax.tree.map(lambda x, i=idx: jax.device_get(x[i]), trajectory_world0)
         for idx in range(max_steps)
     ]
+    success_signal = jax.device_get(trajectory_world0.metrics['success'])
+    blocks_fell_signal = jax.device_get(trajectory_world0.metrics['blocks_fell'])
+    done_indices = jnp.where(blocks_fell_signal > 0.5)[0]
+    is_done_at = int(done_indices[0]) if len(done_indices) > 0 else None
 
-    # 5. Render
-    fps = 1.0 / env.dt
-    frames = env.render(rollout_list, camera="sideview")
+    # Convert JAX Tensors to list for MuJoCo renderer
+    rollout_list = [
+        jax.tree.map(lambda x, i=i: jax.device_get(x[i]), trajectory_world0)
+        for i in range(max_steps)
+    ]
+
+    # Render
+    render_every = 2
+    fps = 1.0 / env.dt / render_every
+    
+    frames = infer_env.render(
+        rollout_list[::render_every], 
+        height=480, width=640, 
+        camera="sideview"
+    )
+    
+    # Dynamic Success Marker
+    # Determine the color based on the final frame's success metric
+    final_is_success = success_signal[-1] > 0.5
+    marker_color = [0, 255, 0] if final_is_success else [255, 0, 0]
+
+    if is_done_at is not None:
+        # Convert the physics index to the rendered frames index
+        render_done_idx = is_done_at // render_every
+        for f_idx in range(render_done_idx, len(frames)):
+            # Draw the square only from the moment the task was 'done'
+            is_success = success_signal[f_idx * render_every] > 0.5
+            marker_color = [0, 255, 0] if is_success else [255, 0, 0]
+            frames[f_idx][10:60, 10:60, :] = marker_color
+
     media.write_video("examine_policy.mp4", frames, fps=fps)
 
 
@@ -283,6 +257,6 @@ infer_env_cfg.num_blocks = 3
 # This bypasses the Brax AutoResetWrapper entirely
 infer_env = CobotEnv(config=infer_env_cfg)
 
-move_joint(infer_env, num_envs=4, max_steps=100)
-# restore_checkpoint_path = "/home/luisamao/villa_spaces/sim_ws/checkpoints/dry-tree-91/000043089920"
-# examine_policy(infer_env, num_envs=4, max_steps=100, restore_checkpoint_path=restore_checkpoint_path)
+# move_joint(infer_env, num_envs=4, max_steps=100)
+restore_checkpoint_path = "/home/luisamao/villa_spaces/sim_ws/checkpoints/glad-paper-140/000045547520"
+examine_policy(infer_env, num_envs=4, max_steps=500, restore_checkpoint_path=restore_checkpoint_path)

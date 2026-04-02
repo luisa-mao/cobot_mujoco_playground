@@ -22,6 +22,7 @@ import functools
 import copy
 from datetime import datetime
 from domain_randomization import domain_randomize_batch
+from utils import get_video
 
 import jax
 import jax.numpy as jp
@@ -76,104 +77,23 @@ def progress_callback(num_steps, metrics, wandb_run):
 def policy_video_callback(num_steps, make_inference_fn, params, wandb_run, infer_env, num_envs = 4, episode_length=250):
 
     jit_inference_fn = jax.jit(make_inference_fn(params, deterministic=False)) # here
-    jit_reset = jax.jit(jax.vmap(infer_env.reset))
-    jit_step = jax.jit(jax.vmap(infer_env.step))
-    
-    rng = jax.random.PRNGKey(num_steps)
-    rng_batch = jax.random.split(rng, num_envs) 
-    reset_states = jit_reset(rng_batch)
-    
-    # Setup Skeletons
-    empty_data = reset_states.data.__class__(
-        **{k: None for k in reset_states.data.__annotations__}
-    )
-    empty_traj = reset_states.__class__(
-        **{k: None for k in reset_states.__annotations__}
-    )
-    empty_traj = empty_traj.replace(data=empty_data, metrics={})
-
-    # Define the Step Function
-    def step_fn(carry, _):
-        state, rng = carry
-        rng, act_key = jax.random.split(rng)
-        act, _ = jit_inference_fn(state.obs, act_key)
-        state = jit_step(state, act)
-        
-        traj_data = empty_traj.tree_replace({
-            "data.qpos": state.data.qpos,
-            "data.qvel": state.data.qvel,
-            "data.time": state.data.time,
-            "data.ctrl": state.data.ctrl,
-            "data.mocap_pos": state.data.mocap_pos,
-            "data.mocap_quat": state.data.mocap_quat,
-            "data.xfrc_applied": state.data.xfrc_applied,
-        })
-        # Track both success and the overall done flag
-        traj_data = traj_data.replace(
-            metrics={'success': state.metrics['success'], 'blocks_fell': state.metrics['blocks_fell']},
-            done=state.done
-        )
-        return (state, rng), traj_data
-
-    # Execute Rollout
-    _, traj_stacked = jax.lax.scan(
-        step_fn, (reset_states, rng), None, length=episode_length
-    )
-
-    # Post-Process (World 0)
-    traj_world0 = jax.tree.map(lambda x: x[:, 0], traj_stacked)
-    
-    # Move signals to CPU for logic processing
-    success_signal = jax.device_get(traj_world0.metrics['success'])
-    blocks_fell_signal = jax.device_get(traj_world0.metrics['blocks_fell'])
-    
-    # Find the FIRST index where 'done' is true
-    done_indices = jp.where(blocks_fell_signal > 0.5)[0]
-    is_done_at = int(done_indices[0]) if len(done_indices) > 0 else None
-
-    # Convert JAX Tensors to list for MuJoCo renderer
-    rollout_list = [
-        jax.tree.map(lambda x, i=i: jax.device_get(x[i]), traj_world0)
-        for i in range(episode_length)
-    ]
-
-    # Render
     render_every = 2
-    fps = 1.0 / infer_env.dt / render_every
-    
-    frames = infer_env.render(
-        rollout_list[::render_every], 
-        height=480, width=640, 
-        camera="sideview"
-    )
-    
-    # Dynamic Success Marker
-    # Determine the color based on the final frame's success metric
-    final_is_success = success_signal[-1] > 0.5
-    marker_color = [0, 255, 0] if final_is_success else [255, 0, 0]
-
-    if is_done_at is not None:
-        # Convert the physics index to the rendered frames index
-        render_done_idx = is_done_at // render_every
-        for f_idx in range(render_done_idx, len(frames)):
-            # Draw the square only from the moment the task was 'done'
-            is_success = success_signal[f_idx] > 0.5
-            marker_color = [0, 255, 0] if is_success else [255, 0, 0]
-            frames[f_idx][10:60, 10:60, :] = marker_color
-
+    frames, final_is_success = get_video(jit_inference_fn, infer_env, num_envs=num_envs, episode_length=episode_length, rng_seed = num_steps, render_every=render_every)
     video_path = f"videos/{wandb_run.name}"
     os.makedirs(video_path, exist_ok=True)
     video_file = f"{video_path}/step_{num_steps}.mp4"
+    fps = 1.0 / infer_env.dt / render_every
     media.write_video(video_file, frames, fps=fps)
     print(f"Logged video for step {num_steps}. Success: {final_is_success}")
     wandb_run.log({
-        'policy_video': wandb.Video(video_file, fps=30, format="mp4"),
+        'policy_video': wandb.Video(video_file, fps=fps, format="mp4"),
     })
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train Cobot with MJX')
     parser.add_argument('--vision', action='store_true', help='Enable vision-based training')
     parser.add_argument('--num_envs', type=int, default=None, help='Override number of envs')
+    parser.add_argument('--wandb_notes', type=str, default="", help='Override wandb notes')
     args = parser.parse_args()
 
     env_cfg = default_config()
@@ -235,9 +155,17 @@ if __name__ == "__main__":
         "clipping_epsilon": 0.2,
     }
 
+    # Ensure env_cfg is converted to a dict correctly
+    env_cfg_dict = dict(env_cfg)
+
+    # Use the union operator (|) to merge dictionaries
+    wandb_config = training_config | env_cfg_dict
+
+    # Initialize wandb using the merged config
     wandb_run = wandb.init(
         project="cobot-reach-mujoco-playground",
-        config=training_config,
+        notes=args.wandb_notes,
+        config=wandb_config, # Changed from training_config to wandb_config
     )
 
     wandb_progress_callback = functools.partial(progress_callback, wandb_run=wandb_run)

@@ -42,6 +42,7 @@ def default_config() -> config_dict.ConfigDict:
       naccdmax=5000,
       num_blocks = 3,
       num_joints = 9,
+      action_scale = 0.025,
   )
 
 def prepare_cobot_model(robot_xml_path, table_xml_path, assets_dir, num_blocks=3):
@@ -57,7 +58,8 @@ def prepare_cobot_model(robot_xml_path, table_xml_path, assets_dir, num_blocks=3
     ET.SubElement(worldbody, 'include', file=table_xml_path)
     
     # 3. Inject Stack of Blocks
-    block_size = [0.03, 0.03, 0.03]  # Half-extents
+    block_size = [0.0635, 0.019, 0.0127]  # Half-extents
+    # block_size = [0.03, 0.03, 0.03]  # Half-extents
     table_surface_z = 0.72
     base_x, base_y = 0.8, 0.0
     
@@ -116,11 +118,15 @@ class CobotEnv(mjx_env.MjxEnv):
 
         # model stuff
         self._num_blocks: int = self._config.num_blocks
+        self._block_height: int = 0
         self._xml_string = prepare_cobot_model(ROBOT_XML, TABLE_XML, ASSETS_DIR, num_blocks = self._num_blocks)
         self._mj_model = mujoco.MjModel.from_xml_string(self._xml_string)
         self._num_joints: int = self._config.num_joints
-        self._action_scale = 0.1
+        self._action_scale: int = self._config.action_scale
         self._episode_length: int = self._config.episode_length
+        if self._num_blocks > 0:
+            self._block_geom_idx = mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_GEOM, 'block_0')
+            self._block_height = self._mj_model.geom_size[self._block_geom_idx, 2]
         # print(f"\nModel loaded successfully!")
         # mj_model = self._mj_model
         # print(f"  - DOFs: {mj_model.nv}")
@@ -169,13 +175,13 @@ class CobotEnv(mjx_env.MjxEnv):
 
         # table and blocks
         table_surface_z = self.mjx_model.geom_pos[self._table_idx, 2]
-        block_half_height = 0.03
+        block_half_height = self._block_height if self._num_blocks > 0 else 0.015
         rng, pos_key = jax.random.split(rng)
     
-        block_base_x, block_base_y = 0.6, -0.18
-        jitter = 0.1
-        # block_base_x, block_base_y = 0.72, -0.00
-        # jitter = 0.01
+        # block_base_x, block_base_y = 0.6, -0.18
+        # jitter = 0.1
+        block_base_x, block_base_y = 0.72, -0.00
+        jitter = 0.01
         xy_offset = jax.random.uniform(
             pos_key, (2,), minval=-jitter, maxval=jitter
         )
@@ -384,17 +390,17 @@ class CobotEnv(mjx_env.MjxEnv):
         other_xy_move = xy_move[:-1]
         other_z_drop = z_drop[:-1]
 
+        # is_failure = jp.any(other_xy_move > 0.03) | jp.any(other_z_drop > self._block_height)
         is_failure = jp.any(other_xy_move > 0.03) | jp.any(other_z_drop > 0.03)
 
         top_xy_move = xy_move[-1]
         top_z_drop = z_drop[-1]
         top_pos = current_blocks_pos[-1]
 
-        is_success = (top_z_drop > 0.06) & (top_xy_move > 0.03)
+        # is_success = (top_z_drop > 2 * self._block_height) & (top_xy_move > 0.03)
+        is_success = (top_z_drop > 2 * 0.03) & (top_xy_move > 0.03)
         top_reward_knockdown = jp.where(is_success, 20.0, 0.0)
         reward_bottom_knockdown = jp.where(is_failure, -10.0, 0.0)
-        # top_reward_knockdown = jp.where(is_success, 80.0, 0.0)
-        # reward_bottom_knockdown = jp.where(is_failure, -100.0, 0.0)
         reward_knockdown = top_reward_knockdown + reward_bottom_knockdown
 
         blocks_fell = (is_success | is_failure).astype(jp.float32)
@@ -402,11 +408,11 @@ class CobotEnv(mjx_env.MjxEnv):
 
         penalty_action_rate = penalty_action_rate * (-1.0 + blocks_fell * -10.0)
         dist_to_top_block = jp.linalg.norm(hand_pos - top_pos)
-        # amplitude = 4.0
-        # sigma = 0.1
-        # reward_approach_pos = amplitude * jp.exp(-(dist_to_top_block**2) / (2 * sigma**2))
-        # reward_approach = (-dist_to_top_block + reward_approach_pos) * (1.0 - blocks_fell)
-        reward_approach = (-dist_to_top_block * 2.0) * (1.0 - blocks_fell)
+        amplitude = 4.0
+        sigma = 0.1
+        reward_approach_pos = amplitude * jp.exp(-(dist_to_top_block**2) / (2 * sigma**2))
+        reward_approach = (-dist_to_top_block + reward_approach_pos) * (1.0 - blocks_fell)
+        # reward_approach = (-dist_to_top_block * 2.0) * (1.0 - blocks_fell)
         
         reward = reward_knockdown + reward_approach + penalty_table + penalty_action_rate + penalty_action_direction + abs(top_xy_move) * 10.0
         
