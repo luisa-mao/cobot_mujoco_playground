@@ -224,7 +224,7 @@ if __name__ == "__main__":
         "num_minibatches": num_minibatches,
         "num_updates_per_batch": 4,
         "discounting": 0.99,
-        "learning_rate": 6e-5,
+        "learning_rate": 3e-4,
         "entropy_cost": 5e-3,
         "num_envs": num_envs,
         "num_eval_envs": eval_num_envs,

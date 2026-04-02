@@ -139,6 +139,7 @@ class CobotEnv(mjx_env.MjxEnv):
             self._mj_model, mujoco.mjtObj.mjOBJ_SITE, 'pinch_site'
         )
         self._gripper_max_width = 0.04
+        self._difficulty_buckets = 10
 
 
         for i in range(self._mj_model.njnt):
@@ -171,12 +172,14 @@ class CobotEnv(mjx_env.MjxEnv):
         block_half_height = 0.03
         rng, pos_key = jax.random.split(rng)
     
-        block_base_x, block_base_y = 0.6, -0.1
-        jitter = 0.01
+        block_base_x, block_base_y = 0.6, -0.18
+        jitter = 0.1
+        # block_base_x, block_base_y = 0.72, -0.00
+        # jitter = 0.01
         xy_offset = jax.random.uniform(
             pos_key, (2,), minval=-jitter, maxval=jitter
         )
-        block_curr_x = block_base_x + xy_offset[0]
+        block_curr_x = block_base_x + xy_offset[0] * 0.1
         block_curr_y = block_base_y + xy_offset[1]
         for i in range(self._num_blocks):
             start_idx = self._num_joints + (i * 7)
@@ -340,10 +343,10 @@ class CobotEnv(mjx_env.MjxEnv):
     ) -> Tuple[jax.Array, jax.Array, dict[str, Any]]:
         
         hand_pos = data.site_xpos[self._ee_site_idx]
-        safety_margin = 0.05 
+        safety_margin = 0.03
         table_z = self.mjx_model.geom_pos[self._table_idx, 2]
         penetration = table_z + safety_margin - hand_pos[2]
-        penalty_table = jp.where(penetration > 0, -10.0, 0.0)
+        penalty_table = jp.where(penetration > 0, -5.0, 0.0)
         penalty_action_rate = jp.linalg.norm(action * self._action_scale)
         penalty_action_direction = jp.linalg.norm((action - info.get('prev_action', jp.zeros_like(action))) * self._action_scale) * -1.0
         
@@ -388,7 +391,7 @@ class CobotEnv(mjx_env.MjxEnv):
         top_pos = current_blocks_pos[-1]
 
         is_success = (top_z_drop > 0.06) & (top_xy_move > 0.03)
-        top_reward_knockdown = jp.where(is_success, 10.0, 0.0)
+        top_reward_knockdown = jp.where(is_success, 20.0, 0.0)
         reward_bottom_knockdown = jp.where(is_failure, -10.0, 0.0)
         # top_reward_knockdown = jp.where(is_success, 80.0, 0.0)
         # reward_bottom_knockdown = jp.where(is_failure, -100.0, 0.0)
@@ -399,7 +402,11 @@ class CobotEnv(mjx_env.MjxEnv):
 
         penalty_action_rate = penalty_action_rate * (-1.0 + blocks_fell * -10.0)
         dist_to_top_block = jp.linalg.norm(hand_pos - top_pos)
-        reward_approach = -dist_to_top_block * blocks_fell
+        # amplitude = 4.0
+        # sigma = 0.1
+        # reward_approach_pos = amplitude * jp.exp(-(dist_to_top_block**2) / (2 * sigma**2))
+        # reward_approach = (-dist_to_top_block + reward_approach_pos) * (1.0 - blocks_fell)
+        reward_approach = (-dist_to_top_block * 2.0) * (1.0 - blocks_fell)
         
         reward = reward_knockdown + reward_approach + penalty_table + penalty_action_rate + penalty_action_direction + abs(top_xy_move) * 10.0
         
