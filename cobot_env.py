@@ -414,7 +414,7 @@ class CobotEnv(mjx_env.MjxEnv):
         reward_approach = (-dist_to_top_block + reward_approach_pos) * (1.0 - blocks_fell)
         # reward_approach = (-dist_to_top_block * 2.0) * (1.0 - blocks_fell)
         
-        reward = reward_knockdown + reward_approach + penalty_table + penalty_action_rate + penalty_action_direction + abs(top_xy_move) * 10.0
+        reward = reward_knockdown + reward_approach + penalty_table + penalty_action_rate + penalty_action_direction + abs(top_xy_move) * 10.0 * (1.0 - blocks_fell)
         
         metrics = dict(metrics)
         metrics["reward/xy_displace"] = abs(top_xy_move)

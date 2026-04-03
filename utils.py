@@ -4,6 +4,9 @@ from brax.training.acme import running_statistics
 import jax
 import jax.numpy as jp
 import functools
+from brax.training import distribution
+from brax.training import networks
+from flax import linen
 
 def load_inference_without_env(model_path, obs_dim=30, action_dim=7):
     """
@@ -49,6 +52,23 @@ def create_student_network(obs_dim, action_dim):
         action_size=action_dim,
         preprocess_observations_fn=running_statistics.normalize
     )
+    # parametric_action_distribution = distribution.NormalTanhDistribution(
+    #     event_size=action_dim
+    # )
+    # student_policy = networks.make_policy_network(
+    #   parametric_action_distribution.param_size,
+    #   obs_dim,
+    #   preprocess_observations_fn=running_statistics.normalize,
+    #   hidden_layer_sizes=(32,) * 4,
+    #   activation=linen.swish,
+    #   obs_key = 'state',
+    #   distribution_type='tanh_normal',
+    #   noise_std_type='scalar',
+    #   init_noise_std=1.0,
+    #   state_dependent_std=False,
+    #   kernel_init=jax.nn.initializers.lecun_uniform(),
+    #   mean_clip_scale=None,
+    # )
 
     # 2. Randomly Initialize Parameters
     rng = jax.random.PRNGKey(0)
@@ -60,10 +80,13 @@ def create_student_network(obs_dim, action_dim):
     )
 
     # Initialize the policy network (MLP)
+    # initial_policy_params = student_policy.init(p_key)
     initial_policy_params = ppo_nets.policy_network.init(p_key)
 
     # We return the pieces needed for both Training and Inference
     return {
+        # "policy_network": student_policy,
+        # "dist": parametric_action_distribution,
         "policy_network": ppo_nets.policy_network,
         "dist": ppo_nets.parametric_action_distribution,
         "params": (initial_norm_params, initial_policy_params)
@@ -78,10 +101,9 @@ def get_student_inference_fn(student_dict):
         # apply() handles the internal preprocess_observations_fn
         logits = policy_net.apply(params[0], params[1], obs)
         
-        # 2. Post-processing
-        # Transforms raw logits into Tanh-squashed actions [-1, 1]
-        raw_actions = dist.sample_no_postprocessing(logits, key)
-        postprocessed_actions = dist.postprocess(raw_actions)
+        # 2. Post-processing. this needs to be deterministic,
+        # since that's how it's trained in the distillation
+        postprocessed_actions = dist.mode(logits)
         
         return postprocessed_actions, {}
     return inference_fn
