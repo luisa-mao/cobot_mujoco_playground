@@ -43,6 +43,7 @@ def default_config() -> config_dict.ConfigDict:
       num_blocks = 3,
       num_joints = 9,
       action_scale = 0.025,
+      include_teacher_obs = False,
   )
 
 def prepare_cobot_model(robot_xml_path, table_xml_path, assets_dir, num_blocks=3):
@@ -146,6 +147,7 @@ class CobotEnv(mjx_env.MjxEnv):
         )
         self._gripper_max_width = 0.04
         self._difficulty_buckets = 10
+        self._include_teacher_obs = self._config.include_teacher_obs
 
 
         for i in range(self._mj_model.njnt):
@@ -256,9 +258,12 @@ class CobotEnv(mjx_env.MjxEnv):
         for i in range(self._num_blocks):
             start_idx = self._num_joints + (i * 7)
             info[f'block{i+1}_init_pos'] = data.qpos[start_idx : start_idx + 3]
+
+        if self._include_teacher_obs:
+            info['teacher_obs'] = self._get_obs(data, info, vision = False)
         
         reward, done = jp.zeros(2)  # pylint: disable=redefined-outer-name
-        obs = self._get_obs(data, info)
+        obs = self._get_obs(data, info, vision = self._vision)
 
         # vision
         if self._vision:
@@ -267,6 +272,8 @@ class CobotEnv(mjx_env.MjxEnv):
             out = mjx.render(self.mjx_model, render_data, self._rc_pytree)
             basecam_rgb = mjx.get_rgb(self._rc_pytree, self._basecam_idx, out[0])
             wristcam_rgb = mjx.get_rgb(self._rc_pytree, self._wristcam_idx, out[0])
+            # basecam_rgb = jp.clip((basecam_rgb * 255).astype(jp.uint8), 0, 255)
+            # wristcam_rgb = jp.clip((wristcam_rgb * 255).astype(jp.uint8), 0, 255)
             info["basecam_frames"] = basecam_rgb
             info["wristcam_frames"] = wristcam_rgb
             obs["pixels/basecam"] = basecam_rgb
@@ -279,7 +286,7 @@ class CobotEnv(mjx_env.MjxEnv):
         ctrl = self._get_ctrl(state.data, action)
         data = mjx_env.step(self.mjx_model, state.data, ctrl, self.n_substeps)
         r, done, metrics = self._get_reward(data, action, state.info, state.metrics)
-        obs = self._get_obs(data, state.info)
+        obs = self._get_obs(data, state.info, vision = self._vision)
 
         info = dict(state.info)
         info['prev_ctrl'] = ctrl
@@ -292,10 +299,15 @@ class CobotEnv(mjx_env.MjxEnv):
             out = mjx.render(self.mjx_model, render_data, self._rc_pytree)
             basecam_rgb = mjx.get_rgb(self._rc_pytree, self._basecam_idx, out[0])
             wristcam_rgb = mjx.get_rgb(self._rc_pytree, self._wristcam_idx, out[0])
+            # basecam_rgb = jp.clip((basecam_rgb * 255).astype(jp.uint8), 0, 255)
+            # wristcam_rgb = jp.clip((wristcam_rgb * 255).astype(jp.uint8), 0, 255)
             info["basecam_frames"] = basecam_rgb
             info["wristcam_frames"] = wristcam_rgb
             obs["pixels/basecam"] = basecam_rgb
             obs["pixels/wristcam"] = wristcam_rgb
+
+        if self._include_teacher_obs:
+            info['teacher_obs'] = self._get_obs(data, state.info, vision = False)
 
         # return mjx_env.State(data, obs, r, done, metrics, info)
         return state.replace(
@@ -308,7 +320,7 @@ class CobotEnv(mjx_env.MjxEnv):
         )
 
 
-    def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> jax.Array:
+    def _get_obs(self, data: mjx.Data, info: dict[str, Any], vision: bool = False) -> jax.Array:
         qpos_raw = data.qpos[:self._num_joints]
         qpos_arm_normalized = (qpos_raw + jp.pi) % (2 * jp.pi) - jp.pi
         prev_action = info['prev_action']
@@ -317,7 +329,7 @@ class CobotEnv(mjx_env.MjxEnv):
         qvel_arm = data.qvel[:self._num_joints]
         ee_pos = data.site_xpos[self._ee_site_idx]
         
-        if self._vision:
+        if vision:
             obs = jp.concatenate([
                 qpos_arm_normalized, # self._num_joints dimensions
                 prev_action,

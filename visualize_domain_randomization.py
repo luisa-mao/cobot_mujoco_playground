@@ -47,6 +47,7 @@ def tile(img, d):
 
 state = jit_reset(jax.random.split(jax.random.PRNGKey(0), 64))
 basecam_image_name = "domain_randomize_basecam.png"
+print(type(state.info['basecam_frames']), state.info['basecam_frames'].shape, state.info['basecam_frames'].dtype, state.info['basecam_frames'].min(), state.info['basecam_frames'].max())
 media.write_image(basecam_image_name, tile(state.info['basecam_frames'][:64], 8), width=512)
 print("saved to", basecam_image_name)
 wristcam_image_name = "domain_randomize_wristcam.png"

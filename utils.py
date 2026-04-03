@@ -1,5 +1,6 @@
 from brax.training.agents.ppo import checkpoint
 from brax.training.agents.ppo import networks as ppo_networks
+from brax.training.agents.ppo import networks_vision as ppo_networks_vision
 from brax.training.acme import running_statistics
 import jax
 import jax.numpy as jp
@@ -47,28 +48,28 @@ def load_inference_without_env(model_path, obs_dim=30, action_dim=7):
 def create_student_network(obs_dim, action_dim):
     # 1. Use the factory to create the architecture
     # This includes the preprocess_observations_fn (Standardizer)
-    ppo_nets = ppo_networks.make_ppo_networks(
-        observation_size=obs_dim,
-        action_size=action_dim,
-        preprocess_observations_fn=running_statistics.normalize
+    # ppo_nets = ppo_networks.make_ppo_networks(
+    #     observation_size=obs_dim,
+    #     action_size=action_dim,
+    #     preprocess_observations_fn=running_statistics.normalize
+    # )
+    parametric_action_distribution = distribution.NormalTanhDistribution(
+        event_size=action_dim
     )
-    # parametric_action_distribution = distribution.NormalTanhDistribution(
-    #     event_size=action_dim
-    # )
-    # student_policy = networks.make_policy_network(
-    #   parametric_action_distribution.param_size,
-    #   obs_dim,
-    #   preprocess_observations_fn=running_statistics.normalize,
-    #   hidden_layer_sizes=(32,) * 4,
-    #   activation=linen.swish,
-    #   obs_key = 'state',
-    #   distribution_type='tanh_normal',
-    #   noise_std_type='scalar',
-    #   init_noise_std=1.0,
-    #   state_dependent_std=False,
-    #   kernel_init=jax.nn.initializers.lecun_uniform(),
-    #   mean_clip_scale=None,
-    # )
+    student_policy = networks.make_policy_network(
+      parametric_action_distribution.param_size,
+      obs_dim,
+      preprocess_observations_fn=running_statistics.normalize,
+      hidden_layer_sizes=(32,) * 4,
+      activation=linen.swish,
+      obs_key = 'state',
+      distribution_type='tanh_normal',
+      noise_std_type='scalar',
+      init_noise_std=1.0,
+      state_dependent_std=False,
+      kernel_init=jax.nn.initializers.lecun_uniform(),
+      mean_clip_scale=None,
+    )
 
     # 2. Randomly Initialize Parameters
     rng = jax.random.PRNGKey(0)
@@ -80,15 +81,15 @@ def create_student_network(obs_dim, action_dim):
     )
 
     # Initialize the policy network (MLP)
-    # initial_policy_params = student_policy.init(p_key)
-    initial_policy_params = ppo_nets.policy_network.init(p_key)
+    initial_policy_params = student_policy.init(p_key)
+    # initial_policy_params = ppo_nets.policy_network.init(p_key)
 
     # We return the pieces needed for both Training and Inference
     return {
-        # "policy_network": student_policy,
-        # "dist": parametric_action_distribution,
-        "policy_network": ppo_nets.policy_network,
-        "dist": ppo_nets.parametric_action_distribution,
+        "policy_network": student_policy,
+        "dist": parametric_action_distribution,
+        # "policy_network": ppo_nets.policy_network,
+        # "dist": ppo_nets.parametric_action_distribution,
         "params": (initial_norm_params, initial_policy_params)
     }
 
@@ -97,18 +98,59 @@ def get_student_inference_fn(student_dict):
     dist = student_dict["dist"]
 
     def inference_fn(params, obs, key):
-        # 1. Preprocessing & MLP
-        # apply() handles the internal preprocess_observations_fn
         logits = policy_net.apply(params[0], params[1], obs)
-        
-        # 2. Post-processing. this needs to be deterministic,
+        # this needs to be deterministic,
         # since that's how it's trained in the distillation
         postprocessed_actions = dist.mode(logits)
         
         return postprocessed_actions, {}
     return inference_fn
 
-def get_video(jit_inference_fn, infer_env, num_envs = 4, episode_length=250, rng_seed = 0, render_every = 2):
+
+
+
+def create_student_network_vision(obs_dim, action_dim):
+    # 1. Use the factory to create the architecture
+    # This includes the preprocess_observations_fn (Standardizer)
+    ppo_nets = ppo_networks_vision.make_ppo_networks_vision(
+        observation_size=obs_dim,
+        action_size=action_dim,
+        policy_obs_key="joint_states",
+        value_obs_key="joint_states",
+        preprocess_observations_fn=running_statistics.normalize
+    )
+
+    # 2. Randomly Initialize Parameters
+    rng = jax.random.PRNGKey(0)
+    p_key, n_key = jax.random.split(rng)
+    
+    # Initialize the normalizer (Preprocessing)
+    norm_blueprint = {
+        "joint_states": jax.ShapeDtypeStruct(shape=obs_dim["joint_states"], dtype=jp.float32)
+    }
+    initial_norm_params = running_statistics.init_state(
+        norm_blueprint
+    )
+    # initial_norm_params = running_statistics.init_state(
+    #     jax.ShapeDtypeStruct(shape=obs_dim["joint_states"], dtype=jp.float32)
+    # )
+
+    # Initialize the policy network (MLP)
+    initial_policy_params = ppo_nets.policy_network.init(p_key)
+
+    # We return the pieces needed for both Training and Inference
+    return {
+        "policy_network": ppo_nets.policy_network,
+        "dist": ppo_nets.parametric_action_distribution,
+        "params": (initial_norm_params, initial_policy_params)
+    }
+
+
+
+
+
+
+def get_video(jit_inference_fn, infer_env, num_envs = 4, episode_length=250, rng_seed = 0, render_every = 2, obs_key = None):
     jit_reset = jax.jit(jax.vmap(infer_env.reset))
     jit_step = jax.jit(jax.vmap(infer_env.step))
     
@@ -129,7 +171,8 @@ def get_video(jit_inference_fn, infer_env, num_envs = 4, episode_length=250, rng
     def step_fn(carry, _):
         state, rng = carry
         rng, act_key = jax.random.split(rng)
-        act, _ = jit_inference_fn(state.obs, act_key)
+        obs = state.obs if obs_key is None else state.info[obs_key]
+        act, _ = jit_inference_fn(obs, act_key)
         state = jit_step(state, act)
         
         traj_data = empty_traj.tree_replace({

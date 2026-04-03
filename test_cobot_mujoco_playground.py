@@ -206,10 +206,6 @@ def examine_policy(env, num_envs=4, max_steps=500, restore_checkpoint_path=''):
 
     # 4. Squeeze to World 0 and move to CPU
     trajectory_world0 = jax.tree.map(lambda x: x[:, 0], trajectory)
-    rollout_list = [
-        jax.tree.map(lambda x, i=idx: jax.device_get(x[i]), trajectory_world0)
-        for idx in range(max_steps)
-    ]
     success_signal = jax.device_get(trajectory_world0.metrics['success'])
     blocks_fell_signal = jax.device_get(trajectory_world0.metrics['blocks_fell'])
     done_indices = jnp.where(blocks_fell_signal > 0.5)[0]
