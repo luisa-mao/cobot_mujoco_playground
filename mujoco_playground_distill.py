@@ -7,7 +7,7 @@ os.environ['XLA_FLAGS'] = xla_flags
 
 
 
-from utils import load_inference_without_env
+from utils import get_obs_shape, load_inference_without_env
 import jax
 
 import jax
@@ -22,6 +22,11 @@ import mediapy as media
 import functools
 import wandb
 import argparse
+from brax.training import checkpoint
+
+import orbax.checkpoint as ocp
+import shutil
+
 
 class DummyWandbRun:
     def __init__(self) -> None:
@@ -96,53 +101,10 @@ def dagger_rollout(env, student_policy, teacher_policy, beta=0.5, num_envs=4, ma
         wandb_run.log({'distill/total_reward_env0': jax.device_get(total_reward_env0)})
         wandb_run.log({'distill/mean_batch_reward': jax.device_get(mean_batch_reward)})
 
-    # trajectory_world0 = jax.tree.map(lambda x: x[:, 0], trajectory)
-    # # 2. Get a single state object to use as a "skeleton"
-    # # We take the first environment's initial state (index 0)
-    # state_skeleton = jax.tree.map(lambda x: x[0], init_state)
-
-    # # 3. Reconstruct the list of State objects
-    # rollout_list = []
-    # for idx in range(max_steps):
-    #     # We take the skeleton and replace its internal data with step 'idx'
-    #     # jax.tree.map slices every leaf in the PyTree at that time step
-    #     step_data = jax.tree.map(lambda x: jax.device_get(x[idx]), trajectory_world0)
-        
-    #     # Merge into the skeleton. 
-    #     # This works because MujocoPlayground states are usually named tuples or dataclasses
-    #     step_state = state_skeleton.replace(
-    #         data=step_data['data'],
-    #         obs=step_data['obs'],
-    #         reward=step_data['reward'],
-    #         done=step_data['done']
-    #     )
-    #     rollout_list.append(step_state)
-
-    # # Render
-    # render_every = 2
-    # fps = 1.0 / env.dt / render_every
-    
-    # frames = env.render(
-    #     rollout_list[::render_every], 
-    #     height=480, width=640, 
-    #     camera="sideview"
-    # )
-    # media.write_video("distill_debug/dagger_rollout.mp4", frames, fps=fps)
     return trajectory
 
 
 def loss_fn(student_params, normalizer_params, obs, expert_actions):
-
-    # def preprocess_pixels(k, v):
-    #     if isinstance(k, str) and "pixels" in k and v.dtype == jp.uint8:
-    #         return v.astype(jp.float32) / 255.0
-    #     return v
-
-    # # Use tree_util.tree_map_with_path to check keys
-    # obs = jax.tree_util.tree_map_with_path(
-    #     lambda path, val: preprocess_pixels(jax.tree_util.keystr(path), val), 
-    #     obs
-    # )
 
     logits = student["policy_network"].apply(normalizer_params, student_params, obs)
     predicted_actions = student["dist"].mode(logits)
@@ -181,20 +143,11 @@ if __name__ == "__main__":
     env_cfg['include_teacher_obs'] = True
     env = CobotEnv(config=env_cfg)
 
-    reset_key = jax.random.PRNGKey(0)
-    rng_batch = jax.random.split(reset_key, num_envs) 
-    reset_fn_ = jax.jit(jax.vmap(env.reset))
-    env_state = reset_fn_(rng_batch)
-
-    jax.tree_util.tree_map(lambda x: print(f"Array: {x.shape}"), env_state.obs)
-
-    # Discard the batch axes over devices and envs.
-    obs_shape = jax.tree_util.tree_map(lambda x: x.shape[1:], env_state.obs)
-
+    obs_shape = get_obs_shape(env, num_envs)
     print("\n--- Network Input Shapes (The 'Blueprint') ---")
     print(obs_shape)
 
-    teacher_obs_shape = jax.tree_util.tree_map(lambda x: x.shape[1:], env_state.info["teacher_obs"])
+    teacher_obs_shape = get_obs_shape(env, num_envs, obs_key="teacher_obs")
     print("\n--- Teacher Obs Shapes (The 'Labels') ---")
     print(teacher_obs_shape)
 
@@ -212,7 +165,8 @@ if __name__ == "__main__":
     student_params = student["params"]
 
     # teacher
-    restore_checkpoint_path = "/home/luisamao/villa_spaces/sim_ws/checkpoints/glad-paper-140/000045547520"
+    # restore_checkpoint_path = "/home/luisamao/villa_spaces/sim_ws/checkpoints/glad-paper-140/000045547520"
+    restore_checkpoint_path = "/home/luisamao/villa_spaces/sim_ws/checkpoints/classic-river-146/000045547520"
     teacher_jit_inference_fn = load_inference_without_env(restore_checkpoint_path, obs_dim=teacher_obs_shape, action_dim=action_dim)
     student_jit_inference_fn = get_student_inference_fn(student)
 
@@ -230,6 +184,11 @@ if __name__ == "__main__":
             notes=args.wandb_notes,
             # config=wandb_config, # Changed from training_config to wandb_config
         )
+
+    # checkpointer
+    # using orbax rather than brax's ppo checkpointing for the student to be more flexible
+    checkpointer = ocp.PyTreeCheckpointer()
+    checkpoint_dir = os.path.abspath(f"checkpoints/{wandb_run.name}")
 
     for iteration in range(NUM_DAGGER_ITERATIONS):
         # Calculate current beta (prob of using teacher actions)
@@ -252,7 +211,7 @@ if __name__ == "__main__":
 
         render_every = 2
 
-        if iteration % 5 == 0:
+        if iteration % 1 == 0: # here
             fps = 1.0 / env.dt / render_every
             frames, final_is_success = get_video(student_jit_inference_fn_w_params, env, num_envs=num_envs, episode_length=250, rng_seed=iteration, render_every = render_every)
             video_file = f"distill_debug_{wandb_run.name}/it_{iteration}_distill.mp4"
@@ -267,11 +226,19 @@ if __name__ == "__main__":
             wandb_run.log({
                 'teacher_video': wandb.Video(teacher_video_file, format="mp4"),
             })
+
+            # save checkpoint
+            iter_path = os.path.join(checkpoint_dir, f"iteration_{iteration}")
+            ckpt = {
+                    'model': student_params,
+                    'optimizer': opt_state,
+                    'iteration': iteration
+                }
+            checkpointer.save(iter_path, ckpt)
+            print("saved checkpoint to:", iter_path)
         
         # B. Flatten the trajectory for training
         # trajectory['obs'] shape: [steps, num_envs, obs_dim] -> [total_samples, obs_dim]
-        # obs_batch = trajectory['obs'].reshape(-1, obs_dim)
-
         # we use -1 to squash (steps * envs) and then keep the rest of the dimensions
         obs_batch = jax.tree.map(
             lambda x: x.reshape(-1, *x.shape[2:]), 
