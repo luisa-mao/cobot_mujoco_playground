@@ -1,0 +1,210 @@
+<mujoco model="Omni_Kinova_Cobot">
+  <compiler angle="radian" autolimits="true" />
+  <option integrator="implicitfast" iterations="1" ls_iterations="0" cone="elliptic" impratio="10" timestep="0.002" />
+  
+  <visual>
+    <global offwidth="1920" offheight="1080" /> 
+    <scale forcewidth="0.1" contactwidth="0.3" contactheight="0.1" framelength="0.5" framewidth="0.01" />
+    <headlight ambient="0.6 0.6 0.6" diffuse="0.4 0.4 0.4" specular="0 0 0"/>
+  </visual>
+
+  <default>
+    <default class="visual">
+      <geom type="mesh" contype="0" conaffinity="0" group="2" rgba="0.75294 0.75294 0.75294 1" />
+    </default>
+    <default class="collision">
+      <geom type="capsule" group="3" contype="2" conaffinity="1" />
+    </default>
+    <default class="environment">
+      <geom contype="1" conaffinity="2" />
+    </default>
+    <default class="large_actuator">
+      <position kp="2000" kv="100" forcerange="-105 105" />
+    </default>
+    <default class="small_actuator">
+      <position kp="500" kv="50" forcerange="-52 52" />
+    </default>
+    <site size="0.001" rgba="0.5 0.5 0.5 0.3" group="4" />
+  </default>
+
+  <equality>
+    <joint joint1="left_finger_joint" joint2="right_finger_joint" polycoef="0 1 0 0 0" />
+  </equality>
+
+  <visual>
+  <headlight diffuse="0.4 0.4 0.4" specular="0 0 0" ambient="0.2 0.2 0.2"/>
+  </visual>
+
+  <asset>
+    <mesh name="base_link" file="kinova_gen3/assets/base_link.stl" />
+    <mesh name="shoulder_link" file="kinova_gen3/assets/shoulder_link.stl" />
+    <mesh name="half_arm_1_link" file="kinova_gen3/assets/half_arm_1_link.stl" />
+    <mesh name="half_arm_2_link" file="kinova_gen3/assets/half_arm_2_link.stl" />
+    <mesh name="forearm_link" file="kinova_gen3/assets/forearm_link.stl" />
+    <mesh name="spherical_wrist_1_link" file="kinova_gen3/assets/spherical_wrist_1_link.stl" />
+    <mesh name="spherical_wrist_2_link" file="kinova_gen3/assets/spherical_wrist_2_link.stl" />
+    <mesh name="bracelet_with_vision_link" file="kinova_gen3/assets/bracelet_with_vision_link.stl" />
+    <mesh name="cobot_base_link" file="cobot_base/assets/base_link.stl" />
+
+    <texture name="skybox_grad" type="skybox" builtin="gradient" rgb1="0.1 0.1 0.1" rgb2="0.6 0.4 0.4" width="512" height="512"/>
+
+
+                <!-- rgb1="0.8823529411764706 0.8627450980392157 0.8470588235294118" rgb2="0.8627450980392157 0.8313725490196079 0.8313725490196079"  -->
+
+
+    <texture name="tex_wood_surface" type="2d" builtin="gradient" 
+                rgb1="0.3 0.2 0.1" rgb2="0.6 0.55 0.5" 
+                width="512" height="512" mark="none"/>
+    
+    <material name="mat_wood_surface" texture="tex_wood_surface" 
+              texrepeat="1 15" shininess="0.0" specular="0.0" reflectance="0.0"/>
+
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 1.5" dir="0 0 -1" directional="true" />
+    <light name="sunlight" pos="0 0 1.5" dir="0 0 -1" 
+         ambient="0.5 0.5 0.5" diffuse="0.3 0.3 0.3" 
+         specular="0.0 0.0 0.0" castshadow="false"/>
+    <light name="sunlight2" pos="0.8 -2 0.8" dir="0 1 0" 
+         ambient="0.3 0.3 0.3" diffuse="0.2 0.2 0.2" 
+         specular="0.0 0.0 0.0" castshadow="false"/>
+    <light name="sunlight3" pos="-0.8 -3.2 2.0" dir=".2 .8 -0.2" 
+         ambient="0.2 0.2 0.2" diffuse="0.1 0.1 0.1" 
+         specular="0.0 0.0 0.0" castshadow="false"/>
+
+    <geom name="floor" type="box" size="2 2 0.01" pos="0 0 -0.01" rgba=".1 .1 .1 1" />
+    
+    <body name="omni_chassis" pos="0 0 0.1">
+      <!-- <joint name="base_x" type="slide" axis="1 0 0" damping="20" />
+      <joint name="base_y" type="slide" axis="0 1 0" damping="20" />
+      <joint name="base_yaw" type="hinge" axis="0 0 1" damping="10" /> -->
+      <geom type="mesh" mesh="cobot_base_link" mass="20.0" rgba="0.2 0.2 0.2 0.5" euler="1.571 0 0" contype="0" conaffinity="0" />
+      <geom type="box" size="0.25 0.35 0.15" pos="0 0 0.1" class="collision" />
+
+      <body name="base_link" pos="0 .025 0.469">
+        <geom class="visual" mesh="base_link" />
+          <!-- <camera name="basecam_hand_tuned" pos="0.1 -0.38 0.52" quat="0.62735 0.43968 -0.36908 -0.52662" />  -->
+                <!--the above is 70 degree rotation x, -80 degree rotation z in world frame-->
+          <!-- <camera name="basecam_ros_convention" pos="0.0158 -0.2815 0.5664" quat="0.5100 -0.6224 0.5100 -0.3038" />  -->
+
+          <!-- <camera name="basecam"
+            pos="0.0158 -0.2815 0.5664"
+            quat="0.6224 0.51 -0.3038 -0.51"
+            mode="fixed"
+            resolution="1280 720"
+            sensorsize="1280 720"
+            focalpixel="612.29 612.05"
+            principalpixel="0.14 -4.72"
+          />  -->
+          <camera name="basecam"
+            pos="0.028 -0.2815 0.51"
+            quat="0.6224 0.51 -0.3038 -0.51"
+            mode="fixed"
+            resolution="1280 720"
+            sensorsize="1280 720"
+            focalpixel="612.29 612.05"
+            principalpixel="0.14 -4.72"
+          /> 
+          <!-- the above comes from base cam extrinsics from the robot, rotated pi rad around x axis
+          to go from ros convention (x right, z forward, y down) to mujoco convention (x right, -z forward, y up) -->
+        <!-- <site name="basecam_site" type="box" pos="0.0158 -0.2815 0.5664" quat="0.6224 0.51 -0.3038 -0.51" size="0.02 0.03 0.04" rgba="0 0 1 1" group="1" /> -->
+
+        <body name="shoulder_link" pos="0 0 0.15643" quat="0 1 0 0">
+          <joint name="joint_1" />
+          <geom class="visual" mesh="shoulder_link" name="shoulder_link_visual"/>
+          <body name="half_arm_1_link" pos="0 0.005375 -0.12838" quat="1 1 0 0">
+            <joint name="joint_2" range="-2.24 2.24" />
+            <geom class="visual" mesh="half_arm_1_link" name="half_arm_1_link_visual"/>
+            <geom class="collision" size="0.05" fromto="0 0 0 0 -0.2 0" name="half_arm_1_link_collision" />
+            <body name="half_arm_2_link" pos="0 -0.21038 -0.006375" quat="1 -1 0 0">
+              <joint name="joint_3" />
+              <geom class="visual" mesh="half_arm_2_link" name="half_arm_2_link_visual"/>
+              <geom class="collision" type="capsule" size="0.05" fromto="0 0 0 0 0 -0.2" name="half_arm_2_link_collision" />
+              <body name="forearm_link" pos="0 0.006375 -0.21038" quat="1 1 0 0">
+                <joint name="joint_4" range="-2.57 2.57" />
+                <geom class="visual" mesh="forearm_link" name="forearm_link_visual"/>
+                <geom class="collision" type="capsule" size="0.05" fromto="0 0 0 0 -0.2 0" name="forearm_link_collision" />
+                <body name="spherical_wrist_1_link" pos="0 -0.20843 -0.006375" quat="1 -1 0 0">
+                  <joint name="joint_5" />
+                  <geom class="visual" mesh="spherical_wrist_1_link" name="spherical_wrist_1_link_visual"/>
+                  <geom class="collision" type="capsule" size="0.05" fromto="0 0 0 0 0  -0.1" name="spherical_wrist_1_link_collision" />
+                  <body name="spherical_wrist_2_link" pos="0 0.00017505 -0.10593" quat="1 1 0 0">
+                    <joint name="joint_6" range="-2.09 2.09" />
+                    <geom class="visual" mesh="spherical_wrist_2_link" name="spherical_wrist_2_link_visual"/>
+                    <geom class="collision" type="capsule" size="0.05" fromto="0 0 0 0 -0.1 0 " name="spherical_wrist_2_link_collision" />
+
+
+                    <body name="end_effector" pos="0 -0.10593 -0.00017505" quat="1 -1 0 0">
+                      <joint name="joint_7" />
+                      
+                      <geom class="visual" mesh="bracelet_with_vision_link" />
+                      
+                      <camera name="handcam" pos="0.0 -0.06 -0.07" quat="0 0 0 1" mode="fixed" resolution="1280 720" sensorsize="1280 720" focalpixel="1297.67 1298.63" principalpixel="-19.09 121.72" />
+                      <!-- <site name="handcam_site" pos="0.0 -0.06 -0.07" quat="0 0 0 1" size="0.02" rgba="0 0 1 1" group="1" /> -->
+
+                      <body name="gripper_base" pos="0 0 -0.06">
+                        <!-- <geom name="gripper_palm_visual" type="box" size="0.1 0.01 0.02" pos="0 0 0" rgba="0 0 1 0" contype="0" conaffinity="0" /> -->
+                        <site name="pinch_site" pos="0 0 -0.18" quat="0 1 0 0" group="3" />
+                        
+                        <body name="left_finger" pos="0.04 0 0"> 
+                        <!-- from wrist link to gripper tip is 7 inches -->
+                          <joint name="left_finger_joint" type="slide" axis="-1 0 0" range="0 0.04" damping="50"/>
+                          <geom name="left_finger_visual" type="box" size="0.0025 0.0064 0.09" pos="0 0 -.09" rgba="1 1 1 1" contype="0" conaffinity="0"/>
+                          <geom name="left_pad_collision" class="collision" type="box" size="0.0025 0.0064 0.09" pos="0 0 -.09"
+                                friction="2.0 0.05 0.001" 
+                                solimp="0.95 0.99 0.01" 
+                                solref="0.001 1" 
+                                priority="1" rgba="0.1 0.1 0.1 1" />
+                        </body>
+
+                        <body name="right_finger" pos="-0.04 0 0">
+                          <joint name="right_finger_joint" type="slide" axis="1 0 0" range="0 0.04" damping="50"/>
+                          <geom name="right_finger_visual" type="box" size="0.0025 0.0064 0.09" pos="0 0 -.09" rgba="1 1 1 1" contype="0" conaffinity="0"/>
+                            <geom name="right_pad_collision" class="collision" type="box" size="0.0025 0.0064 0.09" pos="0 0 -.09" 
+                                  friction="2.0 0.05 0.001" 
+                                solimp="0.95 0.99 0.01" 
+                                solref="0.001 1" 
+                                priority="1" rgba="0.1 0.1 0.1 1" />
+                        </body>
+                      </body>
+                    </body>
+
+
+
+
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+    <body name="target_visual" mocap="true">
+      <geom type="sphere" size="0.03" rgba="0 1 0 0.5" contype="0" conaffinity="0" pos="-0.2 -0.5 0.8"/>
+    </body>
+    <camera name="sideview" pos="2.0 0 1.2" quat="0.5 0.5 0.5 0.5" />
+    <camera name="topdown" pos="0 0 3.0" quat="1 0 0 0" />
+    <!-- <camera name="sideview_y" pos="0.0 4.0 0.8" quat="0 0 0.7071 0.7071" /> -->
+  </worldbody>
+
+
+  <actuator>
+    <!-- <velocity name="cmd_vel_x" joint="base_x" kv="5000" ctrlrange="-10 10" />
+    <velocity name="cmd_vel_y" joint="base_y" kv="5000" ctrlrange="-10 10" />
+    <velocity name="cmd_vel_yaw" joint="base_yaw" kv="5000" ctrlrange="-3.14 3.14" /> -->
+    <position class="large_actuator" name="joint_1" joint="joint_1" />
+    <position class="large_actuator" name="joint_2" joint="joint_2" ctrlrange="-2.24 2.24" />
+    <position class="large_actuator" name="joint_3" joint="joint_3" />
+    <position class="large_actuator" name="joint_4" joint="joint_4" ctrlrange="-2.57 2.57" />
+    <position class="small_actuator" name="joint_5" joint="joint_5" />
+    <position class="small_actuator" name="joint_6" joint="joint_6" ctrlrange="-2.09 2.09" />
+    <position class="small_actuator" name="joint_7" joint="joint_7" />
+    <position name="gripper_actuator" joint="left_finger_joint" ctrlrange="0 0.04" kp="1000" />
+  </actuator>
+
+  <keyframe>
+    <key name="home" qpos="0 0.26 3.14 -2.26 0 0.95 1.57" />
+  </keyframe>
+</mujoco>

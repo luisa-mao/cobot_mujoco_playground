@@ -23,7 +23,7 @@ def default_vision_config() -> config_dict.ConfigDict:
       use_shadows=False,
       render_rgb=(True, True),
       render_depth=(False, False),
-      enabled_geom_groups=[0, 1, 2, 3],
+      enabled_geom_groups=[0, 1, 2],
       cam_active=(False, False, True, True), # [sidecam, topdown, basecam, handcam] ?
   )
 
@@ -42,8 +42,9 @@ def default_config() -> config_dict.ConfigDict:
       naccdmax=5000,
       num_blocks = 3,
       num_joints = 9,
-      action_scale = 0.025,
+      action_scale = 0.05, # 0.025,
       include_teacher_obs = False,
+      observation_noise = False,
   )
 
 def prepare_cobot_model(robot_xml_path, table_xml_path, assets_dir, num_blocks=3):
@@ -63,6 +64,9 @@ def prepare_cobot_model(robot_xml_path, table_xml_path, assets_dir, num_blocks=3
     # block_size = [0.03, 0.03, 0.03]  # Half-extents
     table_surface_z = 0.72
     base_x, base_y = 0.8, 0.0
+
+    base_color = [0.60, 0.55, 0.50]
+    jitter_range = 0.1
     
     for i in range(num_blocks):
         # Calculate Z: surface + (2 * half_height * index) + offset
@@ -83,7 +87,8 @@ def prepare_cobot_model(robot_xml_path, table_xml_path, assets_dir, num_blocks=3
         # Add geom with stable manipulation parameters
         ET.SubElement(block_body, 'geom', name=f'geom_{block_name}', type='box', 
                       size=' '.join(map(str, block_size)), 
-                      rgba='1 0 0 1' if i % 2 == 0 else '0 1 0 1', # Alternate colors
+                    #   rgba='1 0 0 1' if i % 2 == 0 else '0 1 0 1', # Alternate colors
+                      rgba="0.60 0.55 0.50 1", # here
                       mass='0.1', friction='1.0 0.01 0.0001', condim='4',
                       solimp="0.9 0.95 0.001", solref="0.01 1.0")
 
@@ -148,6 +153,7 @@ class CobotEnv(mjx_env.MjxEnv):
         self._gripper_max_width = 0.04
         self._difficulty_buckets = 10
         self._include_teacher_obs = self._config.include_teacher_obs
+        self._observation_noise = self._config.observation_noise
 
 
         for i in range(self._mj_model.njnt):
@@ -169,6 +175,9 @@ class CobotEnv(mjx_env.MjxEnv):
             self._wristcam_idx = 1
             self._basecam_idx = 0
 
+    def normalize_img(self, x):
+        return (x * 2.0) - 1.0
+
     def reset(self, rng: jax.Array) -> mjx_env.State:
         qpos = jp.zeros(self.mjx_model.nq) 
         qvel = jp.zeros(self.mjx_model.nv) 
@@ -183,7 +192,7 @@ class CobotEnv(mjx_env.MjxEnv):
         # block_base_x, block_base_y = 0.6, -0.18
         # jitter = 0.1
         block_base_x, block_base_y = 0.72, -0.00
-        jitter = 0.01
+        jitter = 0.1
         xy_offset = jax.random.uniform(
             pos_key, (2,), minval=-jitter, maxval=jitter
         )
@@ -274,10 +283,10 @@ class CobotEnv(mjx_env.MjxEnv):
             wristcam_rgb = mjx.get_rgb(self._rc_pytree, self._wristcam_idx, out[0])
             # basecam_rgb = jp.clip((basecam_rgb * 255).astype(jp.uint8), 0, 255)
             # wristcam_rgb = jp.clip((wristcam_rgb * 255).astype(jp.uint8), 0, 255)
-            info["basecam_frames"] = basecam_rgb
-            info["wristcam_frames"] = wristcam_rgb
-            obs["pixels/basecam"] = basecam_rgb
-            obs["pixels/wristcam"] = wristcam_rgb
+            info["basecam_frames"] = jp.clip((basecam_rgb * 255).astype(jp.uint8), 0, 255)
+            info["wristcam_frames"] = jp.clip((wristcam_rgb * 255).astype(jp.uint8), 0, 255)
+            obs["pixels/basecam"] = self.normalize_img(basecam_rgb)
+            obs["pixels/wristcam"] = self.normalize_img(wristcam_rgb)
     
         state = mjx_env.State(data, obs, reward, done, metrics, info)
         return state
@@ -301,10 +310,10 @@ class CobotEnv(mjx_env.MjxEnv):
             wristcam_rgb = mjx.get_rgb(self._rc_pytree, self._wristcam_idx, out[0])
             # basecam_rgb = jp.clip((basecam_rgb * 255).astype(jp.uint8), 0, 255)
             # wristcam_rgb = jp.clip((wristcam_rgb * 255).astype(jp.uint8), 0, 255)
-            info["basecam_frames"] = basecam_rgb
-            info["wristcam_frames"] = wristcam_rgb
-            obs["pixels/basecam"] = basecam_rgb
-            obs["pixels/wristcam"] = wristcam_rgb
+            info["basecam_frames"] = jp.clip((basecam_rgb * 255).astype(jp.uint8), 0, 255)
+            info["wristcam_frames"] = jp.clip((wristcam_rgb * 255).astype(jp.uint8), 0, 255)
+            obs["pixels/basecam"] = self.normalize_img(basecam_rgb)
+            obs["pixels/wristcam"] = self.normalize_img(wristcam_rgb)
 
         if self._include_teacher_obs:
             info['teacher_obs'] = self._get_obs(data, state.info, vision = False)
@@ -318,7 +327,6 @@ class CobotEnv(mjx_env.MjxEnv):
             metrics=metrics,
             info=info
         )
-
 
     def _get_obs(self, data: mjx.Data, info: dict[str, Any], vision: bool = False) -> jax.Array:
         qpos_raw = data.qpos[:self._num_joints]
@@ -334,7 +342,6 @@ class CobotEnv(mjx_env.MjxEnv):
                 qpos_arm_normalized, # self._num_joints dimensions
                 prev_action,
                 qvel_arm,        # self._num_joints dimensions
-                # ee_pos,          # 3 dimensions
             ])
         else:
             block_positions = [
@@ -347,9 +354,18 @@ class CobotEnv(mjx_env.MjxEnv):
                 qpos_arm_normalized,  # self._num_joints dims
                 prev_action,      # self._num_joints dims
                 qvel_arm,         # self._num_joints dims
-                # ee_pos,           # 3 dims
                 *block_positions  # Unpacks the list of (3-dim) arrays into the concatenation
             ])
+
+        if self._observation_noise:
+            base_rng = jax.random.PRNGKey(42) 
+            step_count = info.get('step', 0).astype(jp.int32)
+            rng = jax.random.fold_in(base_rng, step_count)
+            
+            rng, white_noise_key, drift_key = jax.random.split(rng, 3)
+            noise = jax.random.normal(white_noise_key, shape=obs.shape) * 0.01
+            bias = jax.random.uniform(drift_key, shape=obs.shape, minval=-0.01, maxval=0.01)
+            obs = obs + noise + bias            
         return jp.clip(obs, -10.0, 10.0)
 
     def _get_reward(
